@@ -1,0 +1,53 @@
+import type { PlaybackTrack } from "../music/types";
+
+export const messages = {
+  guildOnly: "请在服务器文字频道中使用该指令。",
+  commandFailed: "指令处理失败，请稍后重试。",
+
+  userNotInVoiceChannel: "你当前不在语音频道，请先进入语音频道后再点歌。",
+  botBusyInAnotherVoiceChannel: "机器人已经在另一个语音频道播放中，请到同一语音频道操作。",
+  playUsage: (prefix: string) => `用法：${prefix}点歌 歌曲名`,
+  queueEmpty: "当前队列为空。",
+  nothingPlaying: "当前没有正在播放的歌曲。",
+  pauseWhenIdle: "当前没有可暂停的歌曲。",
+  alreadyPaused: "当前已经是暂停状态。",
+  paused: "已暂停当前播放。",
+  resumeWhenIdle: "当前没有可继续播放的歌曲。",
+  notPaused: "当前不是暂停状态。",
+  resumed: "已继续播放。",
+  skipped: "已切到下一首。",
+  stopped: "已停止播放并清空队列。",
+  searchFailed: (keyword: string) => `没有在网易云找到可播放的结果：${keyword}`,
+  autoDisconnected: "队列已空，机器人已自动离开语音频道。",
+  nowPlaying: (track: PlaybackTrack, stateLabel: string) =>
+    `当前播放：${track.title} - ${track.artistNames}（${stateLabel}）`,
+  queued: (track: PlaybackTrack, position: number, started: boolean) =>
+    started
+      ? `已开始播放：${track.title} - ${track.artistNames}`
+      : `已加入队列第 ${position} 位：${track.title} - ${track.artistNames}`,
+  ffmpegNotFound: "ffmpeg 未找到，无法播放音频。请在 .env 中配置正确的 FFMPEG_PATH（例如 C:\\\\ffmpeg\\\\bin\\\\ffmpeg.exe）后重启机器人。",
+  playbackAborted: "连续播放失败次数过多，已停止队列。请检查 ffmpeg 是否正常可用。",
+  playbackError: (track: PlaybackTrack, reason: string) =>
+    `播放失败，已跳过：${track.title} - ${track.artistNames}；原因：${reason}`,
+  queueList: (current: PlaybackTrack | undefined, queue: PlaybackTrack[]) => {
+    const lines: string[] = [];
+
+    if (current) {
+      lines.push(`当前：${current.title} - ${current.artistNames}`);
+    }
+
+    if (queue.length === 0) {
+      lines.push("排队：无");
+    } else {
+      lines.push("排队：");
+      queue.slice(0, 10).forEach((track, index) => {
+        lines.push(`${index + 1}. ${track.title} - ${track.artistNames}`);
+      });
+      if (queue.length > 10) {
+        lines.push(`……还有 ${queue.length - 10} 首`);
+      }
+    }
+
+    return lines.join("\n");
+  },
+};
