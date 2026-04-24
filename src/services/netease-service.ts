@@ -1,5 +1,5 @@
 import * as NeteaseCloudMusicApi from "NeteaseCloudMusicApi";
-import type { PlaybackTrack } from "../music/types";
+import type { ParsedLyrics, PlaybackTrack } from "../music/types";
 import type { AppLogger } from "../shared/logger";
 
 interface NeteaseArtist {
@@ -223,6 +223,54 @@ export class NeteaseService {
     }
 
     return undefined;
+  }
+
+  async fetchLyrics(songId: string): Promise<ParsedLyrics | undefined> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const params: any = { id: songId };
+      if (this.cookie) {
+        params.cookie = this.cookie;
+      }
+
+      const response = await NeteaseCloudMusicApi.lyric_new(params);
+      const body = response.body as { lrc?: { lyric?: string }; code?: number };
+
+      const lrcText = body.lrc?.lyric;
+      if (!lrcText) {
+        return undefined;
+      }
+
+      return this.parseLrc(lrcText);
+    } catch (error) {
+      this.logger.debug("获取歌词失败", error);
+      return undefined;
+    }
+  }
+
+  private parseLrc(lrcText: string): ParsedLyrics {
+    const lines: Array<{ timeMs: number; text: string }> = [];
+    const regex = /\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/;
+
+    for (const line of lrcText.split("\n")) {
+      const match = line.match(regex);
+      if (!match) continue;
+
+      const min = parseInt(match[1], 10);
+      const sec = parseInt(match[2], 10);
+      const msStr = match[3];
+      const ms = msStr.length === 2
+        ? parseInt(msStr, 10) * 10
+        : parseInt(msStr, 10);
+      const text = match[4].trim();
+
+      if (!text) continue;
+
+      lines.push({ timeMs: min * 60000 + sec * 1000 + ms, text });
+    }
+
+    lines.sort((a, b) => a.timeMs - b.timeMs);
+    return { lines };
   }
 
   private getArtistNames(song: NeteaseSong): string {

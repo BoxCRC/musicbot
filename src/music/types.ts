@@ -17,6 +17,10 @@ export type VoiceChannelRef = {
   name: string;
 };
 
+export type ParsedLyrics = {
+  lines: Array<{ timeMs: number; text: string }>;
+};
+
 export type GuildMusicSession = {
   guildId: string;
   textChannelId?: string;
@@ -29,5 +33,10 @@ export type GuildMusicSession = {
   state: PlaybackState;
   idleTimer?: NodeJS.Timeout;
   voiceKeepAliveTimer?: NodeJS.Timeout;
+  playbackStartedAt?: number;
+  currentLyrics?: ParsedLyrics;
+  nowPlayingMsgId?: string;
+  lyricsUpdateTimer?: NodeJS.Timeout;
+  lastLyricIdx?: number;
   consecutiveErrors: number;
 };

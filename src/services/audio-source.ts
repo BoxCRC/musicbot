@@ -15,6 +15,8 @@ export interface ActiveAudioSource {
   readonly state: "playing" | "paused" | "stopped";
   on(event: "closed", listener: (payload: AudioSourceClosedEvent) => void): this;
   once(event: "closed", listener: (payload: AudioSourceClosedEvent) => void): this;
+  on(event: "firstData", listener: () => void): this;
+  once(event: "firstData", listener: () => void): this;
   pause(): void;
   resume(): void;
   stop(reason?: "skip" | "stop"): Promise<void>;
@@ -27,6 +29,7 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
   private readonly waiters: Array<() => void> = [];
   private finalized = false;
   private stderrLines: string[] = [];
+  private firstDataEmitted = false;
 
   constructor(
     public readonly track: PlaybackTrack,
@@ -116,6 +119,10 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
     });
 
     this.process.stdout.on("data", (chunk: Buffer) => {
+      if (!this.firstDataEmitted) {
+        this.firstDataEmitted = true;
+        this.emit("firstData");
+      }
       this.onChunk(chunk);
     });
 

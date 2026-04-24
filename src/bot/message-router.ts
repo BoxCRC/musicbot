@@ -1,4 +1,5 @@
-import type { MarkdownMessageEvent, PlainTextMessageEvent } from "kasumi.js";
+import type Kasumi from "kasumi.js";
+import { Card, MessageType, type MarkdownMessageEvent, type PlainTextMessageEvent } from "kasumi.js";
 import { COMMANDS, type CommandKey } from "../shared/commands";
 import { messages } from "../shared/messages";
 import type { AppLogger } from "../shared/logger";
@@ -16,6 +17,7 @@ export class MessageRouter {
   private readonly commandAliasMap = new Map<string, CommandKey>();
 
   constructor(
+    private readonly client: Kasumi<Record<string, never>>,
     private readonly player: Player,
     private readonly commandPrefix: string,
     private readonly logger: AppLogger,
@@ -52,7 +54,7 @@ export class MessageRouter {
 
     try {
       const argsText = rest.join(" ").trim();
-      let reply = "";
+      let reply: string | Card = "";
       const context = {
         event,
         player: this.player,
@@ -87,7 +89,19 @@ export class MessageRouter {
       }
 
       if (reply) {
-        await event.reply(reply);
+        if (typeof reply === "string") {
+          await event.reply(reply);
+        } else {
+          const result = await this.client.API.message.create(
+            MessageType.CardMessage,
+            event.channelId,
+            reply,
+            event.messageId,
+          );
+          if (result.err) {
+            this.logger.warn("发送卡片消息失败", result.err);
+          }
+        }
       }
     } catch (error) {
       this.logger.error("消息路由处理失败", error);

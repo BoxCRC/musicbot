@@ -47,7 +47,7 @@ async function main(): Promise<void> {
     logger.child("dashboard"),
   );
 
-  const router = new MessageRouter(player, config.commandPrefix, logger.child("router"));
+  const router = new MessageRouter(client, player, config.commandPrefix, logger.child("router"));
 
   client.on("message.text", (event) => {
     void router.handle(event);

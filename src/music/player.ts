@@ -1,9 +1,10 @@
-import Kasumi, { MessageType } from "kasumi.js";
+import Kasumi, { Card, MessageType } from "kasumi.js";
 
 
 import Koice from "koice";
 import type { AppConfig } from "../config/env";
 import { messages } from "../shared/messages";
+import { buildNowPlayingCard, buildQueuedCard, buildQueueListCard, buildStatusCard } from "../shared/cards";
 import type { AppLogger } from "../shared/logger";
 import { createAudioSource, type ActiveAudioSource, type AudioSourceClosedEvent } from "../services/audio-source";
 import { NeteaseService } from "../services/netease-service";
@@ -25,8 +26,9 @@ export class Player {
     guildId: string,
     textChannelId: string,
     requesterId: string,
+    requesterName: string,
     keyword: string,
-  ): Promise<string> {
+  ): Promise<string | Card> {
     const trimmedKeyword = keyword.trim();
     if (!trimmedKeyword) {
       return messages.playUsage(this.config.commandPrefix);
@@ -52,15 +54,16 @@ export class Player {
     }
 
     try {
-      const track = await this.neteaseService.searchFirstPlayable(trimmedKeyword, requesterId);
+      const track = await this.neteaseService.searchFirstPlayable(trimmedKeyword, requesterName);
       const position = this.queueManager.enqueue(session, track);
 
       if (!session.currentTrack && !session.source) {
         await this.playNext(guildId, false);
-        return messages.queued(track, 1, true);
+        // playNext 已发送正在播放和队列卡片，无需重复发送
+        return "";
       }
 
-      return messages.queued(track, position, false);
+      return buildQueuedCard(track, position, false);
     } catch (error) {
       this.logger.warn("点歌失败", error);
       return messages.searchFailed(trimmedKeyword);
@@ -126,28 +129,34 @@ export class Player {
     return messages.stopped;
   }
 
-  getQueueText(guildId: string): string {
+  getQueue(guildId: string): string | Card {
     const session = this.sessionManager.get(guildId);
     if (!session || (!session.currentTrack && session.queue.length === 0)) {
       return messages.queueEmpty;
     }
 
-    return messages.queueList(session.currentTrack, this.queueManager.list(session));
+    return buildQueueListCard(session.currentTrack, this.queueManager.list(session));
   }
 
-  getNowPlayingText(guildId: string): string {
+  getNowPlaying(guildId: string): string | Card {
     const session = this.sessionManager.get(guildId);
     if (!session?.currentTrack) {
       return messages.nothingPlaying;
     }
 
-    return messages.nowPlaying(session.currentTrack, this.stateLabel(session.state));
+    return buildNowPlayingCard({
+      track: session.currentTrack,
+      stateLabel: this.stateLabel(session.state),
+      startedAt: session.playbackStartedAt,
+      lyrics: session.currentLyrics,
+    });
   }
 
   async shutdown(): Promise<void> {
     for (const session of this.sessionManager.values()) {
       this.clearIdleTimer(session);
       this.stopVoiceKeepAlive(session);
+      this.stopLyricsUpdater(session);
       if (session.source) {
         await session.source.stop("stop");
       } else {
@@ -164,7 +173,12 @@ export class Player {
 
     const nextTrack = this.queueManager.dequeue(session);
     if (!nextTrack) {
+      this.stopLyricsUpdater(session);
       session.currentTrack = undefined;
+      session.playbackStartedAt = undefined;
+      session.currentLyrics = undefined;
+      session.nowPlayingMsgId = undefined;
+      session.lastLyricIdx = undefined;
       this.sessionManager.setState(guildId, "idle");
       this.scheduleIdleDisconnect(session);
       return;
@@ -186,14 +200,14 @@ export class Player {
         session.consecutiveErrors = 0;
         this.queueManager.clear(session);
         if (session.textChannelId) {
-          await this.sendTextMessage(session.textChannelId, messages.playbackAborted);
+          await this.sendMessage(session.textChannelId, buildStatusCard(messages.playbackAborted, Card.Theme.DANGER));
         }
         return;
       }
       if (session.textChannelId) {
-        await this.sendTextMessage(
+        await this.sendMessage(
           session.textChannelId,
-          messages.playbackError(nextTrack, "无法连接语音频道"),
+          buildStatusCard(messages.playbackError(nextTrack, "无法连接语音频道"), Card.Theme.WARNING),
         );
       }
       await this.playNext(guildId, announceInChannel);
@@ -210,16 +224,57 @@ export class Player {
     );
 
     session.source = source;
+    session.playbackStartedAt = undefined;
+    session.currentLyrics = undefined;
     this.sessionManager.setState(guildId, "playing");
+
+    // 异步获取歌词，获取后更新卡片
+    this.neteaseService.fetchLyrics(nextTrack.id).then(async (lyrics) => {
+      session.currentLyrics = lyrics;
+      // 歌词加载后立即更新正在播放卡片
+      if (session.nowPlayingMsgId && session.currentTrack === nextTrack) {
+        const card = buildNowPlayingCard({
+          track: nextTrack,
+          stateLabel: this.stateLabel(session.state),
+          startedAt: session.playbackStartedAt,
+          lyrics: session.currentLyrics,
+        });
+        await this.updateMessage(session.nowPlayingMsgId, card);
+      }
+    }).catch(() => {});
+
+    // 音频首帧到达时才开始计时，避免 ffmpeg 启动延迟导致歌词超前
+    source.once("firstData", async () => {
+      session.playbackStartedAt = Date.now();
+      this.startLyricsUpdater(session, guildId);
+
+      // 立即更新卡片，刷新进度和歌词
+      if (session.nowPlayingMsgId && session.currentTrack === nextTrack) {
+        const card = buildNowPlayingCard({
+          track: nextTrack,
+          stateLabel: this.stateLabel(session.state),
+          startedAt: session.playbackStartedAt,
+          lyrics: session.currentLyrics,
+        });
+        await this.updateMessage(session.nowPlayingMsgId, card);
+      }
+    });
+
     source.once("closed", async (payload) => {
       await this.handleSourceClosed(guildId, source, payload);
     });
 
-    if (announceInChannel && session.textChannelId) {
-      await this.sendTextMessage(
-        session.textChannelId,
-        messages.nowPlaying(nextTrack, this.stateLabel("playing")),
-      );
+    if (session.textChannelId) {
+      const card = buildNowPlayingCard({
+        track: nextTrack,
+        stateLabel: this.stateLabel("playing"),
+      });
+      const msgId = await this.sendMessage(session.textChannelId, card);
+      session.nowPlayingMsgId = msgId;
+
+      // 同时发送队列卡片
+      const queueCard = buildQueueListCard(nextTrack, this.queueManager.list(session));
+      await this.sendMessage(session.textChannelId, queueCard);
     }
   }
 
@@ -234,8 +289,13 @@ export class Player {
     }
 
     const finishedTrack = session.currentTrack;
+    this.stopLyricsUpdater(session);
     session.source = undefined;
     session.currentTrack = undefined;
+    session.playbackStartedAt = undefined;
+    session.currentLyrics = undefined;
+    session.nowPlayingMsgId = undefined;
+    session.lastLyricIdx = undefined;
     this.sessionManager.setState(guildId, "idle");
 
     if (payload.reason === "error") {
@@ -251,7 +311,7 @@ export class Player {
         this.queueManager.clear(session);
         await this.closeConnection(session, "ffmpeg not found");
         if (session.textChannelId) {
-          await this.sendTextMessage(session.textChannelId, messages.ffmpegNotFound);
+          await this.sendMessage(session.textChannelId, buildStatusCard(messages.ffmpegNotFound, Card.Theme.DANGER));
         }
         return;
       }
@@ -263,15 +323,15 @@ export class Player {
         this.queueManager.clear(session);
         await this.closeConnection(session, "too many consecutive errors");
         if (session.textChannelId) {
-          await this.sendTextMessage(session.textChannelId, messages.playbackAborted);
+          await this.sendMessage(session.textChannelId, buildStatusCard(messages.playbackAborted, Card.Theme.DANGER));
         }
         return;
       }
 
       if (finishedTrack && session.textChannelId) {
-        await this.sendTextMessage(
+        await this.sendMessage(
           session.textChannelId,
-          messages.playbackError(finishedTrack, payload.error?.message ?? "未知错误"),
+          buildStatusCard(messages.playbackError(finishedTrack, payload.error?.message ?? "未知错误"), Card.Theme.WARNING),
         );
       }
       await this.playNext(guildId, true);
@@ -304,7 +364,7 @@ export class Player {
       {
         forceRealSpeed: true,
         rtcpMux: false,
-        bitrateFactor: 2.0,
+        bitrateFactor: 1.0,
       },
       this.config.ffmpegPath,
     );
@@ -319,6 +379,16 @@ export class Player {
         session.connection = undefined;
       }
     });
+
+    // 包装 koice 的 retry 方法，记录断开原因
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const koiceAny = connection as any;
+    const originalRetry = koiceAny.retry.bind(connection);
+    koiceAny.retry = async (reason: unknown) => {
+      this.logger.warn("语音连接断开，koice 正在重试", reason);
+      return originalRetry(reason);
+    };
+
     this.startVoiceKeepAlive(session);
 
     return connection;
@@ -392,7 +462,7 @@ export class Player {
 
       await this.closeConnection(session, "idle timeout");
       if (session.textChannelId) {
-        await this.sendTextMessage(session.textChannelId, messages.autoDisconnected);
+        await this.sendMessage(session.textChannelId, buildStatusCard(messages.autoDisconnected, Card.Theme.INFO));
       }
     }, this.config.idleDisconnectSeconds * 1000);
   }
@@ -406,15 +476,70 @@ export class Player {
     session.idleTimer = undefined;
   }
 
-  private async sendTextMessage(channelId: string, content: string): Promise<void> {
-    const result = await this.client.API.message.create(
-      MessageType.TextMessage,
-      channelId,
-      content,
-    );
+  private startLyricsUpdater(session: GuildMusicSession, guildId: string): void {
+    this.stopLyricsUpdater(session);
+    session.lastLyricIdx = undefined;
+
+    session.lyricsUpdateTimer = setInterval(async () => {
+      if (!session.currentTrack || !session.nowPlayingMsgId || !session.playbackStartedAt) {
+        this.stopLyricsUpdater(session);
+        return;
+      }
+
+      // 计算当前歌词行索引，判断是否需要更新
+      let lyricChanged = false;
+      if (session.currentLyrics && session.currentLyrics.lines.length > 0) {
+        const elapsed = Date.now() - session.playbackStartedAt;
+        let currentIdx = -1;
+        for (let i = session.currentLyrics.lines.length - 1; i >= 0; i--) {
+          if (session.currentLyrics.lines[i].timeMs <= elapsed) {
+            currentIdx = i;
+            break;
+          }
+        }
+        lyricChanged = currentIdx !== session.lastLyricIdx;
+        session.lastLyricIdx = currentIdx;
+      }
+
+      // 重建卡片并更新消息
+      const card = buildNowPlayingCard({
+        track: session.currentTrack,
+        stateLabel: this.stateLabel(session.state),
+        startedAt: session.playbackStartedAt,
+        lyrics: session.currentLyrics,
+      });
+
+      try {
+        await this.updateMessage(session.nowPlayingMsgId, card);
+      } catch {
+        // 消息更新失败，停止定时器
+        this.stopLyricsUpdater(session);
+      }
+    }, 1_000);
+  }
+
+  private stopLyricsUpdater(session: GuildMusicSession): void {
+    if (session.lyricsUpdateTimer) {
+      clearInterval(session.lyricsUpdateTimer);
+      session.lyricsUpdateTimer = undefined;
+    }
+  }
+
+  private async sendMessage(channelId: string, content: string | Card): Promise<string | undefined> {
+    const type = typeof content === "string" ? MessageType.TextMessage : MessageType.CardMessage;
+    const result = await this.client.API.message.create(type, channelId, content);
 
     if (result.err) {
-      this.logger.warn("发送文字消息失败", result.err);
+      this.logger.warn("发送消息失败", result.err);
+      return undefined;
+    }
+    return result.data?.msg_id;
+  }
+
+  private async updateMessage(msgId: string, content: string | Card): Promise<void> {
+    const result = await this.client.API.message.update(msgId, content);
+    if (result.err) {
+      this.logger.debug("更新消息失败", result.err);
     }
   }
 
