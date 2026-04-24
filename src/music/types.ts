@@ -28,5 +28,6 @@ export type GuildMusicSession = {
   source?: ActiveAudioSource;
   state: PlaybackState;
   idleTimer?: NodeJS.Timeout;
+  voiceKeepAliveTimer?: NodeJS.Timeout;
   consecutiveErrors: number;
 };

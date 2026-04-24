@@ -147,6 +147,7 @@ export class Player {
   async shutdown(): Promise<void> {
     for (const session of this.sessionManager.values()) {
       this.clearIdleTimer(session);
+      this.stopVoiceKeepAlive(session);
       if (session.source) {
         await session.source.stop("stop");
       } else {
@@ -318,12 +319,14 @@ export class Player {
         session.connection = undefined;
       }
     });
+    this.startVoiceKeepAlive(session);
 
     return connection;
   }
 
   private async closeConnection(session: GuildMusicSession, reason: string): Promise<void> {
     this.clearIdleTimer(session);
+    this.stopVoiceKeepAlive(session);
 
     if (!session.connection) {
       session.voiceChannelId = undefined;
@@ -340,6 +343,38 @@ export class Player {
       await connection.close(reason);
     } catch (error) {
       this.logger.warn("关闭语音连接失败", error);
+    }
+  }
+
+  private static readonly VOICE_KEEPALIVE_MS = 30_000;
+
+  private startVoiceKeepAlive(session: GuildMusicSession): void {
+    this.stopVoiceKeepAlive(session);
+
+    if (!session.voiceChannelId) {
+      return;
+    }
+
+    const channelId = session.voiceChannelId;
+
+    session.voiceKeepAliveTimer = setInterval(async () => {
+      if (!session.connection || session.connection.isClose) {
+        this.stopVoiceKeepAlive(session);
+        return;
+      }
+
+      try {
+        await this.client.API.voice.keepAlive(channelId);
+      } catch (error) {
+        this.logger.debug("语音保活请求异常", error);
+      }
+    }, Player.VOICE_KEEPALIVE_MS);
+  }
+
+  private stopVoiceKeepAlive(session: GuildMusicSession): void {
+    if (session.voiceKeepAliveTimer) {
+      clearInterval(session.voiceKeepAliveTimer);
+      session.voiceKeepAliveTimer = undefined;
     }
   }
 
