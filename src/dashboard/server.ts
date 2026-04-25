@@ -568,7 +568,7 @@ function poll(){
   });
 }
 poll();
-setInterval(poll,3000);
+setInterval(poll,1000);
 
 // ── 运行日志 ──
 var logEntries=[];
