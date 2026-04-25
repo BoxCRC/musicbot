@@ -7,5 +7,6 @@ export async function handleStopCommand(
     return "请在服务器频道内使用该指令。";
   }
 
-  return context.player.stop(context.event.guildId);
+  await context.player.stop(context.event.guildId);
+  return "";
 }

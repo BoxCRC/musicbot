@@ -36,6 +36,7 @@ export type GuildMusicSession = {
   playbackStartedAt?: number;
   currentLyrics?: ParsedLyrics;
   nowPlayingMsgId?: string;
+  progressUpdateTimer?: NodeJS.Timeout;
   lyricsUpdateTimer?: NodeJS.Timeout;
   lastLyricIdx?: number;
   consecutiveErrors: number;

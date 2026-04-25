@@ -1,5 +1,6 @@
 import { createBotClient } from "./bot/client";
 import { MessageRouter } from "./bot/message-router";
+import { setupButtonHandlers } from "./bot/button-handler";
 import { loadConfig } from "./config/env";
 import { Player } from "./music/player";
 import { QueueManager } from "./music/queue-manager";
@@ -39,7 +40,10 @@ async function main(): Promise<void> {
     queueManager,
     sessionManager,
   );
-  
+
+  // 设置按钮事件处理器
+  setupButtonHandlers(client, player, logger.child("button"));
+
   const dashboardServer = startDashboardServer(
     player,
     sessionManager,

@@ -1,5 +1,6 @@
 import { Card } from "kasumi.js";
-import type { ParsedLyrics, PlaybackTrack } from "../music/types";
+import type { ParsedLyrics, PlaybackTrack, PlaybackState } from "../music/types";
+import { BUTTON_ACTIONS, buildButtonValue } from "./button-values";
 
 const Theme = Card.Theme;
 
@@ -153,19 +154,17 @@ export function buildQueueListCard(
 
 export function buildHelpCard(
   prefix: string,
-  commands: Array<{ name: string; aliases: readonly string[] }>,
+  commands: Array<{ name: string; desc: string }>,
 ): Card {
   const card = new Card();
   card.setTheme(Theme.PRIMARY);
   card.addTitle("可用指令");
 
   const lines = commands
-    .map((cmd) => `\`${prefix}${cmd.name}\`　别名：${cmd.aliases.join("、")}`)
+    .map((cmd) => `\`${prefix}${cmd.name}\`　${cmd.desc}`)
     .join("\n");
   card.addText(lines);
 
-  card.addDivider();
-  card.addContext(`发送 ${prefix}点歌 歌曲名 即可开始播放`);
   return card;
 }
 
@@ -176,5 +175,163 @@ export function buildStatusCard(
   const card = new Card();
   card.setTheme(theme);
   card.addText(message);
+  return card;
+}
+
+export function buildPlaylistLoadedCard(
+  playlistName: string,
+  totalTracks: number,
+  loadedTracks: number,
+  skippedTracks: number,
+): Card {
+  const card = new Card();
+  card.setTheme(Theme.SUCCESS);
+  card.addTitle("歌单已加载");
+  card.addText(`**${playlistName}**`);
+  card.addDivider();
+  card.addText(`共 ${totalTracks} 首，成功入队 ${loadedTracks} 首${skippedTracks > 0 ? `，跳过 ${skippedTracks} 首` : ""}`);
+  card.addContext("发送 /队列 查看完整播放列表");
+  return card;
+}
+
+export function buildTopListCard(
+  chartName: string,
+  total: number,
+  loaded: number,
+  skipped: number,
+): Card {
+  const card = new Card();
+  card.setTheme(Theme.SUCCESS);
+  card.addTitle("榜单已加载");
+  card.addText(`**${chartName}**`);
+  card.addDivider();
+  card.addText(`共 ${total} 首，成功入队 ${loaded} 首${skipped > 0 ? `，跳过 ${skipped} 首（无版权/VIP）` : ""}`);
+  card.addContext("发送 /队列 查看完整播放列表");
+  return card;
+}
+
+export function buildSimiSongsCard(
+  currentTrack: PlaybackTrack,
+  loaded: number,
+): Card {
+  const card = new Card();
+  card.setTheme(Theme.SUCCESS);
+  card.addTitle("相似歌曲已入队");
+  card.addText(`基于 **${currentTrack.title}** - ${currentTrack.artistNames}`);
+  card.addDivider();
+  card.addText(`已加入 ${loaded} 首相似歌曲到队列`);
+  card.addContext("发送 /队列 查看完整播放列表");
+  return card;
+}
+
+export function buildArtistTopSongsCard(
+  artistName: string,
+  total: number,
+  loaded: number,
+): Card {
+  const card = new Card();
+  card.setTheme(Theme.SUCCESS);
+  card.addTitle("歌手热门歌曲已加载");
+  card.addText(`**${artistName}** 热门歌曲`);
+  card.addDivider();
+  card.addText(`共 ${total} 首，成功入队 ${loaded} 首`);
+  card.addContext("发送 /队列 查看完整播放列表");
+  return card;
+}
+
+export function buildPlaybackEndedCard(): Card {
+  const card = new Card();
+  card.setTheme(Theme.SECONDARY);
+  card.addTitle("播放已结束");
+  card.addText("当前没有正在播放的歌曲");
+  card.addContext("发送 /点歌 歌曲名 开始播放");
+  return card;
+}
+
+export function buildPlayerPanelCard(params: {
+  track: PlaybackTrack;
+  state: PlaybackState;
+  startedAt?: number;
+  lyrics?: ParsedLyrics;
+  queue: PlaybackTrack[];
+}): Card {
+  const { track, state, startedAt, lyrics, queue } = params;
+
+  const card = new Card();
+  card.setTheme(state === "paused" ? Theme.WARNING : Theme.INFO);
+
+  // 标题
+  const stateText = state === "paused" ? "已暂停" : "正在播放";
+  card.addTitle(stateText);
+
+  // 歌曲信息
+  card.addText(`**${track.title}** - ${track.artistNames}`);
+
+  // 进度和状态
+  const total = formatDuration(track.durationMs);
+  let progress: string;
+  if (startedAt) {
+    const elapsed = Date.now() - startedAt;
+    progress = `${formatDuration(elapsed)} / ${total}`;
+  } else {
+    progress = total;
+  }
+  const stateLabel = state === "playing" ? "播放中" : state === "paused" ? "已暂停" : "缓冲中";
+  card.addText(`(font)${stateLabel}(font)[success]　|　${progress}　|　点歌 ${track.requestedBy}`);
+
+  // 歌词
+  const lyricText = getCurrentLyricLines(lyrics, startedAt);
+  if (lyricText) {
+    card.addDivider();
+    card.addText(lyricText);
+  }
+
+  // 队列预览
+  if (queue.length > 0) {
+    card.addDivider();
+    const preview = queue
+      .slice(0, 3)
+      .map((t, i) => `${i + 1}. ${t.title} - ${t.artistNames}`)
+      .join("\n");
+    card.addText(`**队列预览**\n${preview}`);
+    if (queue.length > 3) {
+      card.addContext(`……还有 ${queue.length - 3} 首`);
+    }
+  }
+
+  // 控制按钮（使用 action-group 实现横排）
+  card.addDivider();
+  const pauseResumeAction = state === "paused" ? BUTTON_ACTIONS.RESUME : BUTTON_ACTIONS.PAUSE;
+  const pauseResumeText = state === "paused" ? "继续" : "暂停";
+  const pauseResumeTheme = state === "paused" ? Theme.SUCCESS : Theme.WARNING;
+
+  // 手动构建 action-group 模块
+  card.addModule({
+    type: "action-group" as any,
+    elements: [
+      {
+        type: "button",
+        theme: pauseResumeTheme,
+        value: buildButtonValue(pauseResumeAction),
+        click: "return-val",
+        text: { type: "plain-text", content: pauseResumeText },
+      },
+      {
+        type: "button",
+        theme: Theme.PRIMARY,
+        value: buildButtonValue(BUTTON_ACTIONS.SKIP),
+        click: "return-val",
+        text: { type: "plain-text", content: "切歌" },
+      },
+      {
+        type: "button",
+        theme: Theme.DANGER,
+        value: buildButtonValue(BUTTON_ACTIONS.STOP),
+        click: "return-val",
+        text: { type: "plain-text", content: "停止" },
+      },
+    ],
+  } as any);
+
   return card;
 }

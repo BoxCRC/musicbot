@@ -7,5 +7,6 @@ export async function handleResumeCommand(
     return "请在服务器频道内使用该指令。";
   }
 
-  return context.player.resume(context.event.guildId);
+  await context.player.resume(context.event.guildId);
+  return "";
 }

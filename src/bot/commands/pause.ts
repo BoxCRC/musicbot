@@ -7,5 +7,6 @@ export async function handlePauseCommand(
     return "请在服务器频道内使用该指令。";
   }
 
-  return context.player.pause(context.event.guildId);
+  await context.player.pause(context.event.guildId);
+  return "";
 }
