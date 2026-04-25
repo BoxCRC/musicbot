@@ -178,16 +178,10 @@ IDLE_DISCONNECT_SECONDS=120
 # Web 控制面板端口，默认 3000
 DASHBOARD_PORT=3000
 
-# ========================================
-# 网易云音乐登录配置（可选）
+# 网易云音乐登录配置
 # 配置后可播放 VIP 歌曲、无损音质
-# ========================================
 
-# 方式一：手机号+密码登录
-# NETEASE_PHONE=13800138000
-# NETEASE_PASSWORD=your_password
-
-# 方式二：直接使用 Cookie（推荐，登录成功后会输出）
+# 使用 Cookie（推荐，登录成功后会输出）
 # NETEASE_COOKIE=your_cookie_here
 ```
 
@@ -202,7 +196,6 @@ DASHBOARD_PORT=3000
 
 | 方式 | 配置项 | 说明 |
 |------|--------|------|
-| 手机号+密码 | `NETEASE_PHONE` + `NETEASE_PASSWORD` | 每次启动时自动登录 |
 | Cookie | `NETEASE_COOKIE` | 手动填入登录后的 Cookie，避免频繁登录 |
 | Web 控制面板 | 浏览器管理 | 在控制面板中更新 Cookie（推荐） |
 
