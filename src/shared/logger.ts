@@ -1,5 +1,14 @@
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+export interface LogEntry {
+  id: number;
+  timestamp: string;
+  level: LogLevel;
+  scope: string;
+  message: string;
+  meta?: string;
+}
+
 export interface AppLogger {
   child(scope: string): AppLogger;
   debug(message: string, meta?: unknown): void;
@@ -14,6 +23,41 @@ const levelOrder: Record<LogLevel, number> = {
   warn: 30,
   error: 40,
 };
+
+// ── 环形缓冲区 ──
+const LOG_BUFFER_SIZE = 500;
+const logBuffer: LogEntry[] = [];
+let logIdCounter = 0;
+const subscribers = new Set<(entry: LogEntry) => void>();
+
+function pushLog(entry: LogEntry): void {
+  logBuffer.push(entry);
+  if (logBuffer.length > LOG_BUFFER_SIZE) {
+    logBuffer.shift();
+  }
+  for (const fn of subscribers) {
+    try {
+      fn(entry);
+    } catch {
+      // 防止订阅者异常影响日志写入
+    }
+  }
+}
+
+export function getRecentLogs(count = 100, afterId?: number): LogEntry[] {
+  let entries = logBuffer;
+  if (afterId !== undefined) {
+    entries = entries.filter((e) => e.id > afterId);
+  }
+  return entries.slice(-count);
+}
+
+export function subscribeLog(fn: (entry: LogEntry) => void): () => void {
+  subscribers.add(fn);
+  return () => {
+    subscribers.delete(fn);
+  };
+}
 
 class ConsoleLogger implements AppLogger {
   constructor(
@@ -46,7 +90,18 @@ class ConsoleLogger implements AppLogger {
       return;
     }
 
-    const prefix = `[${new Date().toISOString()}] [${level.toUpperCase()}] [${this.scope}]`;
+    const entry: LogEntry = {
+      id: ++logIdCounter,
+      timestamp: new Date().toISOString(),
+      level,
+      scope: this.scope,
+      message,
+      meta: meta !== undefined ? String(meta).slice(0, 500) : undefined,
+    };
+
+    pushLog(entry);
+
+    const prefix = `[${entry.timestamp}] [${level.toUpperCase()}] [${this.scope}]`;
 
     if (meta === undefined) {
       console.log(`${prefix} ${message}`);

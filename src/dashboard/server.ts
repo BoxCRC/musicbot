@@ -2,60 +2,310 @@ import http from "http";
 import os from "os";
 import type { Player } from "../music/player";
 import type { SessionManager } from "../music/session-manager";
+import type { NeteaseService } from "../services/netease-service";
+import type { NeteaseAuthService } from "../services/netease-auth";
+import type { GuildMusicSession } from "../music/types";
+import { getRecentLogs, subscribeLog, type LogEntry } from "../shared/logger";
 import type { AppLogger } from "../shared/logger";
+
+// ── 辅助函数 ──
+
+function jsonResponse(res: http.ServerResponse, status: number, data: unknown): void {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.writeHead(status);
+  res.end(JSON.stringify(data));
+}
+
+function readBody(req: http.IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf-8");
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function matchSessionRoute(pathname: string): {
+  guildId: string;
+  action?: string;
+  subResource?: string;
+  subId?: string;
+} | null {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts[0] !== "api" || parts[1] !== "sessions" || !parts[2]) return null;
+  return {
+    guildId: decodeURIComponent(parts[2]),
+    action: parts[3],
+    subResource: parts[3],
+    subId: parts[4],
+  };
+}
+
+function serializeSession(session: GuildMusicSession) {
+  const elapsed = session.playbackStartedAt
+    ? Math.floor((Date.now() - session.playbackStartedAt) / 1000)
+    : null;
+  return {
+    guildId: session.guildId,
+    state: session.state,
+    voiceChannelName: session.voiceChannelName ?? null,
+    currentTrack: session.currentTrack
+      ? {
+          id: session.currentTrack.id,
+          title: session.currentTrack.title,
+          artistNames: session.currentTrack.artistNames,
+          durationMs: session.currentTrack.durationMs,
+          requestedBy: session.currentTrack.requestedBy,
+        }
+      : null,
+    queue: session.queue.map((t, i) => ({
+      index: i,
+      id: t.id,
+      title: t.title,
+      artistNames: t.artistNames,
+      durationMs: t.durationMs,
+      requestedBy: t.requestedBy,
+    })),
+    playbackStartedAt: session.playbackStartedAt ?? null,
+    elapsed,
+    currentLyrics: session.currentLyrics ?? null,
+    queueLength: session.queue.length,
+    consecutiveErrors: session.consecutiveErrors,
+  };
+}
+
+function formatDuration(ms?: number): string {
+  if (!ms) return "0:00";
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// ── 服务器启动 ──
 
 export function startDashboardServer(
   player: Player,
   sessionManager: SessionManager,
+  neteaseService: NeteaseService,
+  neteaseAuthService: NeteaseAuthService,
   port: number,
   logger: AppLogger,
 ): http.Server {
-  const server = http.createServer((req, res) => {
-    // CORS & Basic Headers
+  const server = http.createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-    if (req.url === "/api/status" && req.method === "GET") {
-      const memoryUsage = process.memoryUsage();
-      const sessions = sessionManager.values().map((session) => ({
-        guildId: session.guildId,
-        state: session.state,
-        currentTrack: session.currentTrack
-          ? {
-              title: session.currentTrack.title,
-              artist: session.currentTrack.artistNames,
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url!, `http://${req.headers.host}`);
+    const path = url.pathname;
+    const method = req.method;
+
+    try {
+      // ── 静态页面 ──
+      if (path === "/" && method === "GET") {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.writeHead(200);
+        res.end(DashboardHTML);
+        return;
+      }
+
+      // ── 系统状态 ──
+      if (path === "/api/status" && method === "GET") {
+        const memoryUsage = process.memoryUsage();
+        const sessions = sessionManager.values().map((s) => ({
+          guildId: s.guildId,
+          state: s.state,
+          currentTrack: s.currentTrack
+            ? { title: s.currentTrack.title, artist: s.currentTrack.artistNames }
+            : null,
+          queueLength: s.queue.length,
+          channelName: s.voiceChannelName || "Unknown Channel",
+        }));
+        jsonResponse(res, 200, {
+          uptime: process.uptime(),
+          memory: {
+            rss: Math.round(memoryUsage.rss / 1024 / 1024) + " MB",
+            heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024) + " MB",
+          },
+          cpu: os.cpus()[0].model,
+          activeSessions: sessions.filter((s) => s.state === "playing").length,
+          totalSessions: sessions.length,
+          sessions,
+        });
+        return;
+      }
+
+      // ── 会话列表（含完整信息） ──
+      if (path === "/api/sessions" && method === "GET") {
+        const sessions = sessionManager.values().map(serializeSession);
+        jsonResponse(res, 200, { sessions });
+        return;
+      }
+
+      // ── 日志相关 ──
+      if (path === "/api/logs" && method === "GET") {
+        const count = parseInt(url.searchParams.get("count") || "100", 10);
+        const afterId = url.searchParams.get("afterId");
+        const logs = getRecentLogs(count, afterId ? parseInt(afterId, 10) : undefined);
+        jsonResponse(res, 200, { logs });
+        return;
+      }
+
+      if (path === "/api/logs/stream" && method === "GET") {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+
+        const recent = getRecentLogs(50);
+        for (const entry of recent) {
+          res.write(`id: ${entry.id}\ndata: ${JSON.stringify(entry)}\n\n`);
+        }
+
+        const unsubscribe = subscribeLog((entry) => {
+          try {
+            res.write(`id: ${entry.id}\ndata: ${JSON.stringify(entry)}\n\n`);
+          } catch { /* 连接已关闭 */ }
+        });
+
+        const heartbeat = setInterval(() => {
+          try { res.write(`: heartbeat\n\n`); } catch { /* ignore */ }
+        }, 30000);
+
+        req.on("close", () => {
+          clearInterval(heartbeat);
+          unsubscribe();
+        });
+        return;
+      }
+
+      // ── 认证相关 ──
+      if (path === "/api/auth" && method === "GET") {
+        const cookie = neteaseService.getCookie();
+        const masked = cookie
+          ? cookie.substring(0, 16) + "..." + cookie.slice(-8)
+          : null;
+        jsonResponse(res, 200, {
+          isLoggedIn: neteaseAuthService.isLoggedIn(),
+          cookieMasked: masked,
+          cookieLength: cookie.length,
+        });
+        return;
+      }
+
+      if (path === "/api/auth/cookie" && method === "POST") {
+        const body = (await readBody(req)) as { cookie?: string };
+        if (!body.cookie || typeof body.cookie !== "string") {
+          jsonResponse(res, 400, { error: "缺少 cookie 字段" });
+          return;
+        }
+        neteaseService.setCookie(body.cookie);
+        const isValid = await neteaseService.checkLoginStatus();
+        logger.info(`通过控制面板更新 Cookie，验证结果：${isValid ? "有效" : "无效"}`);
+        jsonResponse(res, 200, {
+          ok: true,
+          isLoggedIn: isValid,
+          message: isValid ? "Cookie 有效，登录态已恢复" : "Cookie 无效或已过期",
+        });
+        return;
+      }
+
+      if (path === "/api/auth/check" && method === "POST") {
+        const isValid = await neteaseService.checkLoginStatus();
+        jsonResponse(res, 200, { isLoggedIn: isValid });
+        return;
+      }
+
+      // ── 会话操作路由 ──
+      const match = matchSessionRoute(path);
+      if (match) {
+        const session = sessionManager.get(match.guildId);
+
+        // 获取单个会话
+        if (!match.action && method === "GET") {
+          if (!session) {
+            jsonResponse(res, 404, { error: "会话不存在" });
+            return;
+          }
+          jsonResponse(res, 200, { session: serializeSession(session) });
+          return;
+        }
+
+        // 播放控制
+        if (method === "POST") {
+          if (!session) {
+            jsonResponse(res, 404, { error: "会话不存在" });
+            return;
+          }
+          switch (match.action) {
+            case "pause":
+              await player.pause(match.guildId);
+              jsonResponse(res, 200, { ok: true });
+              return;
+            case "resume":
+              await player.resume(match.guildId);
+              jsonResponse(res, 200, { ok: true });
+              return;
+            case "skip": {
+              const body = (await readBody(req)) as { position?: number };
+              await player.skip(match.guildId, body.position);
+              jsonResponse(res, 200, { ok: true });
+              return;
             }
-          : null,
-        queueLength: session.queue.length,
-        channelName: session.voiceChannelName || "Unknown Channel",
-      }));
+            case "stop":
+              await player.stop(match.guildId);
+              jsonResponse(res, 200, { ok: true });
+              return;
+          }
+        }
 
-      const status = {
-        uptime: process.uptime(),
-        memory: {
-          rss: Math.round(memoryUsage.rss / 1024 / 1024) + " MB",
-          heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024) + " MB",
-        },
-        cpu: os.cpus()[0].model,
-        activeSessions: sessions.filter((s) => s.state === "playing").length,
-        totalSessions: sessions.length,
-        sessions,
-      };
+        // 队列操作
+        if (method === "DELETE") {
+          if (!session) {
+            jsonResponse(res, 404, { error: "会话不存在" });
+            return;
+          }
+          // DELETE /api/sessions/:guildId/queue/:index
+          if (match.subResource === "queue" && match.subId !== undefined) {
+            const index = parseInt(match.subId, 10);
+            if (isNaN(index) || index < 0 || index >= session.queue.length) {
+              jsonResponse(res, 400, { error: "无效的索引" });
+              return;
+            }
+            session.queue.splice(index, 1);
+            jsonResponse(res, 200, { ok: true, queueLength: session.queue.length });
+            return;
+          }
+          // DELETE /api/sessions/:guildId/queue
+          if (match.action === "queue" && !match.subId) {
+            session.queue.length = 0;
+            jsonResponse(res, 200, { ok: true });
+            return;
+          }
+        }
+      }
 
-      res.writeHead(200);
-      res.end(JSON.stringify(status));
-      return;
+      // ── 404 ──
+      jsonResponse(res, 404, { error: "Not Found" });
+    } catch (error) {
+      logger.error("仪表盘请求处理异常", error);
+      jsonResponse(res, 500, { error: "Internal Server Error" });
     }
-
-    if (req.url === "/" && req.method === "GET") {
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.writeHead(200);
-      res.end(DashboardHTML);
-      return;
-    }
-
-    res.writeHead(404);
-    res.end(JSON.stringify({ error: "Not Found" }));
   });
 
   server.listen(port, () => {
@@ -65,280 +315,331 @@ export function startDashboardServer(
   return server;
 }
 
-const DashboardHTML = `
-<!DOCTYPE html>
+const DashboardHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KOOK 音乐机器人状态监测</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-color: #0f172a;
-            --glass-bg: rgba(30, 41, 59, 0.7);
-            --glass-border: rgba(255, 255, 255, 0.1);
-            --text-primary: #f8fafc;
-            --text-secondary: #94a3b8;
-            --accent-color: #3b82f6;
-            --accent-glow: rgba(59, 130, 246, 0.5);
-            --card-radius: 16px;
-        }
-
-        body {
-            font-family: 'Inter', -apple-system, sans-serif;
-            margin: 0;
-            padding: 0;
-            background: var(--bg-color);
-            background-image: 
-                radial-gradient(at 0% 0%, rgba(59,130,246,0.15) 0px, transparent 50%),
-                radial-gradient(at 100% 100%, rgba(139,92,246,0.15) 0px, transparent 50%);
-            color: var(--text-primary);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-
-        .container {
-            width: 100%;
-            max-width: 1100px;
-            padding: 40px 20px;
-            box-sizing: border-box;
-        }
-
-        .header {
-            text-align: center;
-            margin-bottom: 40px;
-            animation: fadeInDown 0.8s ease-out;
-        }
-
-        h1 {
-            font-size: 2.5rem;
-            font-weight: 800;
-            margin: 0 0 10px 0;
-            background: linear-gradient(to right, #60a5fa, #c084fc);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-
-        .subtitle {
-            color: var(--text-secondary);
-            font-size: 1.1rem;
-        }
-
-        .glass-card {
-            background: var(--glass-bg);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid var(--glass-border);
-            border-radius: var(--card-radius);
-            padding: 24px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-        }
-
-        .glass-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3), 0 0 20px var(--accent-glow);
-        }
-
-        .grid-overview {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-            animation: fadeIn 1s ease-out;
-        }
-
-        .stat-item {
-            text-align: center;
-        }
-
-        .stat-value {
-            font-size: 2rem;
-            font-weight: 800;
-            color: var(--text-primary);
-            margin-bottom: 8px;
-        }
-
-        .stat-label {
-            font-size: 0.9rem;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .sessions-container {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 20px;
-            animation: fadeInUp 1s ease-out;
-        }
-
-        .session-card {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 20px;
-            background: rgba(15, 23, 42, 0.6);
-            border-radius: 12px;
-            border-left: 4px solid var(--accent-color);
-        }
-
-        .session-card.idle {
-            border-left-color: var(--text-secondary);
-        }
-
-        .session-info h3 {
-            margin: 0 0 8px 0;
-            font-size: 1.2rem;
-        }
-
-        .session-info p {
-            margin: 0;
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-        }
-
-        .session-status {
-            text-align: right;
-        }
-
-        .badge {
-            display: inline-block;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 0.85rem;
-            font-weight: 600;
-            text-transform: uppercase;
-        }
-
-        .badge.playing {
-            background: rgba(16, 185, 129, 0.2);
-            color: #34d399;
-        }
-
-        .badge.paused {
-            background: rgba(245, 158, 11, 0.2);
-            color: #fbbf24;
-        }
-
-        .badge.idle {
-            background: rgba(148, 163, 184, 0.2);
-            color: #94a3b8;
-        }
-        
-        .badge.buffering {
-            background: rgba(59, 130, 246, 0.2);
-            color: #60a5fa;
-        }
-
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes fadeInUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-
-        .loader {
-            display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid rgba(255,255,255,.3);
-            border-radius: 50%;
-            border-top-color: #fff;
-            animation: spin 1s ease-in-out infinite;
-        }
-
-        @keyframes spin { to { transform: rotate(360deg); } }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MusicBot 控制面板</title>
+<style>
+:root {
+  --bg: #0f172a; --glass: rgba(30,41,59,0.7); --border: rgba(255,255,255,0.1);
+  --t1: #f8fafc; --t2: #94a3b8; --accent: #3b82f6; --glow: rgba(59,130,246,0.5);
+  --success: #10b981; --warning: #f59e0b; --danger: #ef4444; --radius: 16px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg);
+  background-image: radial-gradient(at 0% 0%,rgba(59,130,246,.15) 0,transparent 50%),
+  radial-gradient(at 100% 100%,rgba(139,92,246,.15) 0,transparent 50%);
+  color: var(--t1); min-height: 100vh; }
+.container { max-width: 1100px; margin: 0 auto; padding: 30px 20px; }
+.header { text-align: center; margin-bottom: 30px; }
+.header h1 { font-size: 2rem; font-weight: 800; margin-bottom: 6px;
+  background: linear-gradient(to right,#60a5fa,#c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.header .sub { color: var(--t2); font-size: 0.95rem; }
+.glass { background: var(--glass); backdrop-filter: blur(12px); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px; box-shadow: 0 8px 32px rgba(0,0,0,.2); }
+.tabs { display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
+.tab-btn { background: var(--glass); border: 1px solid var(--border); color: var(--t2);
+  padding: 10px 20px; border-radius: 10px; cursor: pointer; font-size: 0.9rem; transition: all .2s; }
+.tab-btn:hover { color: var(--t1); border-color: var(--accent); }
+.tab-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tab-panel { display: none; animation: fadeIn .3s ease; }
+.tab-panel.active { display: block; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 16px; margin-bottom: 24px; }
+.stat { text-align: center; }
+.stat .val { font-size: 1.8rem; font-weight: 800; margin-bottom: 4px; }
+.stat .lbl { font-size: 0.85rem; color: var(--t2); text-transform: uppercase; letter-spacing: 1px; }
+.badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
+.badge.playing { background: rgba(16,185,129,.2); color: #34d399; }
+.badge.paused { background: rgba(245,158,11,.2); color: #fbbf24; }
+.badge.buffering { background: rgba(59,130,246,.2); color: #60a5fa; }
+.badge.idle { background: rgba(148,163,184,.2); color: #94a3b8; }
+.session-panel { margin-bottom: 16px; }
+.session-panel .sp-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.session-panel .sp-header h3 { font-size: 1.1rem; }
+.track-info { margin-bottom: 12px; }
+.track-info .title { font-size: 1.1rem; font-weight: 600; }
+.track-info .artist { color: var(--t2); font-size: 0.9rem; }
+.progress-bar { height: 6px; background: rgba(255,255,255,.1); border-radius: 3px; margin: 8px 0; overflow: hidden; }
+.progress-bar .fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 1s linear; }
+.progress-text { font-size: 0.8rem; color: var(--t2); }
+.btn-group { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+.btn { padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer; font-size: 0.85rem; font-weight: 600; transition: all .2s; color: #fff; }
+.btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.btn-primary { background: var(--accent); }
+.btn-warning { background: var(--warning); color: #000; }
+.btn-danger { background: var(--danger); }
+.btn-ghost { background: rgba(255,255,255,.1); color: var(--t2); }
+.btn-ghost:hover { color: var(--t1); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.queue-list { margin-top: 12px; }
+.queue-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px;
+  background: rgba(15,23,42,.5); border-radius: 8px; margin-bottom: 6px; font-size: 0.9rem; }
+.queue-item .qi-title { flex: 1; }
+.queue-item .qi-artist { color: var(--t2); margin-left: 8px; font-size: 0.8rem; }
+.queue-item .del-btn { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 0.85rem; padding: 2px 6px; border-radius: 4px; }
+.queue-item .del-btn:hover { background: rgba(239,68,68,.2); }
+.log-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.log-toolbar label { font-size: 0.9rem; color: var(--t2); display: flex; align-items: center; gap: 4px; }
+.log-toolbar select { background: rgba(255,255,255,.1); border: 1px solid var(--border); color: var(--t1);
+  padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; }
+.log-box { background: rgba(0,0,0,.3); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px; max-height: 500px; overflow-y: auto; font-family: 'Consolas','Courier New',monospace; font-size: 0.82rem; line-height: 1.6; }
+.log-box .log-line { padding: 2px 0; word-break: break-all; }
+.log-box .log-line .ts { color: #64748b; }
+.log-box .log-line .lvl-debug { color: #64748b; }
+.log-box .log-line .lvl-info { color: #38bdf8; }
+.log-box .log-line .lvl-warn { color: #fbbf24; }
+.log-box .log-line .lvl-error { color: #f87171; }
+.log-box .log-line .scope { color: #a78bfa; }
+.auth-card { max-width: 600px; }
+.auth-card .auth-status { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.auth-card .auth-dot { width: 12px; height: 12px; border-radius: 50%; }
+.auth-card .auth-dot.on { background: var(--success); box-shadow: 0 0 8px var(--success); }
+.auth-card .auth-dot.off { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+.auth-card textarea { width: 100%; background: rgba(0,0,0,.3); border: 1px solid var(--border);
+  color: var(--t1); padding: 10px; border-radius: 8px; font-family: monospace; font-size: 0.85rem;
+  resize: vertical; min-height: 80px; margin: 8px 0; }
+.auth-card .cookie-display { font-family: monospace; font-size: 0.85rem; color: var(--t2);
+  background: rgba(0,0,0,.2); padding: 8px 12px; border-radius: 6px; margin: 8px 0; word-break: break-all; }
+.auth-card .warn { color: var(--warning); font-size: 0.85rem; margin-top: 12px; }
+.empty { text-align: center; padding: 40px; color: var(--t2); }
+.toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 10px;
+  font-size: 0.9rem; font-weight: 600; z-index: 999; animation: slideIn .3s ease; }
+.toast.success { background: rgba(16,185,129,.9); color: #fff; }
+.toast.error { background: rgba(239,68,68,.9); color: #fff; }
+@keyframes slideIn { from { opacity: 0; transform: translateX(30px); } to { opacity: 1; transform: translateX(0); } }
+</style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>MusicBot Dashboard</h1>
-            <div class="subtitle">实时服务状态监测 - <span id="last-update">正在连接...</span></div>
-        </div>
+<div class="container">
+  <div class="header">
+    <h1>MusicBot 控制面板</h1>
+    <div class="sub">KOOK 网易云点歌机器人 - <span id="last-update">连接中...</span></div>
+  </div>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="main">控制面板</button>
+    <button class="tab-btn" data-tab="auth">登录设置</button>
+  </div>
 
-        <div class="grid-overview">
-            <div class="glass-card stat-item">
-                <div class="stat-value" id="stat-sessions">-</div>
-                <div class="stat-label">活跃会话</div>
-            </div>
-            <div class="stat-item glass-card">
-                <div class="stat-value" id="stat-memory">-</div>
-                <div class="stat-label">内存占用</div>
-            </div>
-            <div class="stat-item glass-card">
-                <div class="stat-value" id="stat-uptime">-</div>
-                <div class="stat-label">运行时间</div>
-            </div>
-        </div>
-
-        <h2>正在播放</h2>
-        <div class="sessions-container" id="sessions-list">
-            <div style="text-align:center; padding: 40px; color: var(--text-secondary);">
-                <div class="loader"></div>
-                <p>拉取数据中...</p>
-            </div>
-        </div>
+  <!-- 主页面：状态 + 控制 + 日志 -->
+  <div class="tab-panel active" id="tab-main">
+    <div class="grid3">
+      <div class="glass stat"><div class="val" id="stat-sessions">-</div><div class="lbl">活跃会话</div></div>
+      <div class="glass stat"><div class="val" id="stat-memory">-</div><div class="lbl">内存占用</div></div>
+      <div class="glass stat"><div class="val" id="stat-uptime">-</div><div class="lbl">运行时间</div></div>
     </div>
+    <h2 style="margin-bottom:16px">播放控制</h2>
+    <div id="control-list"><div class="empty glass">暂无活跃会话</div></div>
+    <h2 style="margin:20px 0 16px">运行日志</h2>
+    <div class="log-toolbar">
+      <label><input type="checkbox" id="log-autoscroll" checked> 自动滚动</label>
+      <select id="log-filter">
+        <option value="all">全部级别</option>
+        <option value="debug">Debug</option>
+        <option value="info">Info</option>
+        <option value="warn">Warn</option>
+        <option value="error">Error</option>
+      </select>
+      <button class="btn btn-ghost" id="log-clear">清空</button>
+    </div>
+    <div class="log-box" id="log-box"></div>
+  </div>
 
-    <script>
-        function formatUptime(seconds) {
-            const d = Math.floor(seconds / (3600*24));
-            const h = Math.floor(seconds % (3600*24) / 3600);
-            const m = Math.floor(seconds % 3600 / 60);
-            if(d > 0) return \`\${d}天 \${h}小时\`;
-            if(h > 0) return \`\${h}小时 \${m}分\`;
-            return \`\${m}分\`;
-        }
+  <!-- Tab: 登录设置 -->
+  <div class="tab-panel" id="tab-auth">
+    <div class="glass auth-card">
+      <h2 style="margin-bottom:16px">网易云音乐登录</h2>
+      <div class="auth-status">
+        <div class="auth-dot" id="auth-dot"></div>
+        <span id="auth-status-text">检查中...</span>
+      </div>
+      <div>当前 Cookie:</div>
+      <div class="cookie-display" id="auth-cookie">-</div>
+      <div style="margin-top:16px">
+        <div style="margin-bottom:8px;font-weight:600">更新 Cookie:</div>
+        <textarea id="auth-cookie-input" placeholder="粘贴完整的 Cookie 字符串..."></textarea>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="auth-save">验证并保存</button>
+          <button class="btn btn-ghost" id="auth-check">重新验证当前状态</button>
+        </div>
+      </div>
+      <div class="warn">Cookie 包含登录凭证，请勿分享给他人</div>
+    </div>
+  </div>
+</div>
+<script>
+// ── 工具函数 ──
+function fmt(ms){if(!ms)return"0:00";var s=Math.floor(ms/1e3),m=Math.floor(s/60);return m+":"+String(s%60).padStart(2,"0")}
+function fmtUptime(s){var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d>0?d+"天 "+h+"小时":h>0?h+"小时 "+m+"分":m+"分"}
+function esc(t){var d=document.createElement("div");d.textContent=t;return d.innerHTML}
 
-        async function fetchStatus() {
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                
-                document.getElementById('stat-sessions').textContent = \`\${data.activeSessions} / \${data.totalSessions}\`;
-                document.getElementById('stat-memory').textContent = data.memory.rss;
-                document.getElementById('stat-uptime').textContent = formatUptime(data.uptime);
-                
-                const now = new Date();
-                document.getElementById('last-update').textContent = now.toLocaleTimeString();
+var api={
+  get:function(p){return fetch(p).then(function(r){return r.json()})},
+  post:function(p,b){return fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json()})},
+  del:function(p){return fetch(p,{method:"DELETE"}).then(function(r){return r.json()})}
+};
 
-                const listEl = document.getElementById('sessions-list');
-                
-                if(data.sessions.length === 0) {
-                    listEl.innerHTML = '<div class="glass-card" style="text-align:center; color: #94a3b8;">当前没有正在活动的语音频道会话</div>';
-                    return;
-                }
+// ── Toast 提示 ──
+function toast(msg,type){var el=document.createElement("div");el.className="toast "+(type||"success");el.textContent=msg;document.body.appendChild(el);setTimeout(function(){el.remove()},3000)}
 
-                listEl.innerHTML = data.sessions.map(s => {
-                    const badgeClass = s.state.toLowerCase();
-                    const stateText = s.state === 'playing' ? '播放中' : s.state === 'paused' ? '已暂停' : s.state === 'buffering' ? '缓冲中' : '空闲';
-                    const trackTitle = s.currentTrack ? s.currentTrack.title : '没有歌曲';
-                    const trackArtist = s.currentTrack ? s.currentTrack.artist : '空闲状态';
-                    
-                    return \`
-                        <div class="glass-card session-card \${badgeClass}">
-                            <div class="session-info">
-                                <h3>\${s.channelName}</h3>
-                                <p>\${trackTitle} - \${trackArtist} (队列: \${s.queueLength})</p>
-                            </div>
-                            <div class="session-status">
-                                <span class="badge \${badgeClass}">\${stateText}</span>
-                            </div>
-                        </div>
-                    \`;
-                }).join('');
+// ── Tab 切换 ──
+document.querySelectorAll(".tab-btn").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    document.querySelectorAll(".tab-btn").forEach(function(b){b.classList.remove("active")});
+    document.querySelectorAll(".tab-panel").forEach(function(p){p.classList.remove("active")});
+    btn.classList.add("active");
+    document.getElementById("tab-"+btn.dataset.tab).classList.add("active");
+  });
+});
 
-            } catch(e) {
-                console.error(e);
-                document.getElementById('last-update').textContent = '连接中断，重新连接中...';
-            }
-        }
+// ── 播放控制 ──
+function renderControl(data){
+  var playing=data.filter(function(s){return s.state==="playing"}).length;
+  document.getElementById("stat-sessions").textContent=playing+" / "+data.length;
+  var el=document.getElementById("control-list");
+  if(!data.length){el.innerHTML='<div class="empty glass">暂无活跃会话</div>';return}
+  el.innerHTML=data.map(function(s){
+    var bc=s.state;
+    var st=s.state==="playing"?"播放中":s.state==="paused"?"已暂停":s.state==="buffering"?"缓冲中":"空闲";
+    var tt=s.currentTrack?esc(s.currentTrack.title):"无歌曲";
+    var ta=s.currentTrack?esc(s.currentTrack.artistNames):"";
+    var prog="";
+    if(s.currentTrack&&s.currentTrack.durationMs&&s.elapsed!=null){
+      var pct=Math.min(100,s.elapsed/(s.currentTrack.durationMs/1000)*100);
+      prog='<div class="progress-bar"><div class="fill" style="width:'+pct+'%"></div></div><div class="progress-text">'+fmt(s.elapsed*1000)+" / "+fmt(s.currentTrack.durationMs)+'</div>';
+    }
+    var gid=esc(s.guildId);
+    var isPlaying=s.state==="playing";
+    var isPaused=s.state==="paused";
+    var hasTrack=!!s.currentTrack;
+    var btns='<div class="btn-group">';
+    if(hasTrack){
+      btns+=isPlaying?'<button class="btn btn-warning" onclick="doAction(\\''+gid+'\\',\\'pause\\')">暂停</button>':'';
+      if(isPaused) btns+='<button class="btn btn-primary" onclick="doAction(\\''+gid+'\\',\\'resume\\')">继续</button>';
+      btns+='<button class="btn btn-danger" onclick="doAction(\\''+gid+'\\',\\'skip\\')">切歌</button>';
+      btns+='<button class="btn btn-danger" onclick="doAction(\\''+gid+'\\',\\'stop\\')">停止</button>';
+    }
+    btns+='</div>';
+    var queue="";
+    if(s.queue.length>0){
+      queue='<div class="queue-list"><div style="font-weight:600;margin-bottom:8px">队列 ('+s.queue.length+' 首)</div>';
+      queue+=s.queue.map(function(t,i){
+        return '<div class="queue-item"><span class="qi-title">'+esc(t.title)+'</span><span class="qi-artist">'+esc(t.artistNames)+'</span><button class="del-btn" onclick="delQueueItem(\\''+gid+'\\','+i+')">删除</button></div>';
+      }).join("");
+      queue+='<div style="text-align:right;margin-top:8px"><button class="btn btn-ghost" onclick="clearQueue(\\''+gid+'\\')">清空队列</button></div></div>';
+    }
+    return '<div class="glass session-panel"><div class="sp-header"><h3>'+esc(s.voiceChannelName||"未知频道")+'</h3><span class="badge '+bc+'">'+st+'</span></div><div class="track-info"><div class="title">'+tt+'</div><div class="artist">'+ta+'</div>'+prog+'</div>'+btns+queue+'</div>';
+  }).join("");
+}
 
-        fetchStatus();
-        setInterval(fetchStatus, 3000);
-    </script>
+window.doAction=function(gid,action){
+  api.post("/api/sessions/"+encodeURIComponent(gid)+"/"+action).then(function(r){
+    if(r.ok)toast(action==="pause"?"已暂停":action==="resume"?"已继续":action==="skip"?"已切歌":"已停止");
+    else toast(r.error||"操作失败","error");
+  }).catch(function(){toast("请求失败","error")});
+};
+window.delQueueItem=function(gid,idx){
+  api.del("/api/sessions/"+encodeURIComponent(gid)+"/queue/"+idx).then(function(r){
+    if(r.ok)toast("已删除");else toast(r.error||"删除失败","error");
+  }).catch(function(){toast("请求失败","error")});
+};
+window.clearQueue=function(gid){
+  if(!confirm("确认清空队列？"))return;
+  api.del("/api/sessions/"+encodeURIComponent(gid)+"/queue").then(function(r){
+    if(r.ok)toast("队列已清空");else toast(r.error||"操作失败","error");
+  }).catch(function(){toast("请求失败","error")});
+};
+
+// ── 轮询 ──
+function poll(){
+  api.get("/api/sessions").then(function(r){
+    var data=r.sessions||[];
+    document.getElementById("last-update").textContent=new Date().toLocaleTimeString()+" 更新";
+    api.get("/api/status").then(function(s){
+      document.getElementById("stat-memory").textContent=s.memory.rss;
+      document.getElementById("stat-uptime").textContent=fmtUptime(s.uptime);
+    });
+    renderControl(data);
+  }).catch(function(){
+    document.getElementById("last-update").textContent="连接中断...";
+  });
+}
+poll();
+setInterval(poll,3000);
+
+// ── 运行日志 ──
+var logEntries=[];
+var logFilter="all";
+var logBox=document.getElementById("log-box");
+var logAutoScroll=document.getElementById("log-autoscroll");
+var logFilterEl=document.getElementById("log-filter");
+
+function renderLogLine(e){
+  var t=e.timestamp.substring(11,19);
+  return '<div class="log-line" data-level="'+e.level+'"><span class="ts">['+t+']</span> <span class="lvl-'+e.level+'">['+e.level.toUpperCase()+']</span> <span class="scope">['+esc(e.scope)+']</span> '+esc(e.message)+(e.meta?" "+esc(e.meta):"")+'</div>';
+}
+
+function renderLogs(){
+  var filtered=logFilter==="all"?logEntries:logEntries.filter(function(e){return e.level===logFilter});
+  logBox.innerHTML=filtered.map(renderLogLine).join("");
+  if(logAutoScroll.checked)logBox.scrollTop=logBox.scrollHeight;
+}
+
+logFilterEl.addEventListener("change",function(){logFilter=this.value;renderLogs()});
+document.getElementById("log-clear").addEventListener("click",function(){logEntries=[];logBox.innerHTML=""});
+
+// 加载历史日志
+api.get("/api/logs?count=200").then(function(r){
+  logEntries=r.logs||[];
+  renderLogs();
+});
+
+// SSE 实时日志
+var evtSource=new EventSource("/api/logs/stream");
+evtSource.onmessage=function(ev){
+  try{
+    var entry=JSON.parse(ev.data);
+    logEntries.push(entry);
+    if(logEntries.length>500)logEntries.splice(0,logEntries.length-500);
+    if(logFilter==="all"||entry.level===logFilter){
+      logBox.innerHTML+=renderLogLine(entry);
+      if(logBox.children.length>500)logBox.removeChild(logBox.firstChild);
+      if(logAutoScroll.checked)logBox.scrollTop=logBox.scrollHeight;
+    }
+  }catch(e){}
+};
+evtSource.onerror=function(){setTimeout(function(){evtSource=new EventSource("/api/logs/stream")},3000)};
+
+// ── 登录设置 ──
+function refreshAuth(){
+  api.get("/api/auth").then(function(r){
+    var dot=document.getElementById("auth-dot");
+    var txt=document.getElementById("auth-status-text");
+    dot.className="auth-dot "+(r.isLoggedIn?"on":"off");
+    txt.textContent=r.isLoggedIn?"已登录":"未登录";
+    document.getElementById("auth-cookie").textContent=r.cookieMasked||"无 Cookie";
+  });
+}
+refreshAuth();
+
+document.getElementById("auth-save").addEventListener("click",function(){
+  var val=document.getElementById("auth-cookie-input").value.trim();
+  if(!val){toast("请输入 Cookie","error");return}
+  api.post("/api/auth/cookie",{cookie:val}).then(function(r){
+    if(r.ok){toast(r.message);document.getElementById("auth-cookie-input").value="";refreshAuth()}
+    else toast(r.error||"保存失败","error");
+  }).catch(function(){toast("请求失败","error")});
+});
+
+document.getElementById("auth-check").addEventListener("click",function(){
+  api.post("/api/auth/check").then(function(r){
+    toast(r.isLoggedIn?"登录态有效":"登录态无效",r.isLoggedIn?"success":"error");
+    refreshAuth();
+  }).catch(function(){toast("验证失败","error")});
+});
+</script>
 </body>
-</html>
-`;
+</html>`;

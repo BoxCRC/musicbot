@@ -534,6 +534,7 @@ export class Player {
     // 音频首帧到达时才开始计时，避免 ffmpeg 启动延迟导致歌词超前
     source.once("firstData", async () => {
       session.playbackStartedAt = Date.now();
+      this.logger.info(`正在播放：${nextTrack.title} - ${nextTrack.artistNames}`);
       this.startProgressUpdater(session, guildId);
       this.startLyricsUpdater(session, guildId);
 

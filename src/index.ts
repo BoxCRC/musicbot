@@ -47,6 +47,8 @@ async function main(): Promise<void> {
   const dashboardServer = startDashboardServer(
     player,
     sessionManager,
+    neteaseService,
+    neteaseAuthService,
     config.dashboardPort,
     logger.child("dashboard"),
   );
