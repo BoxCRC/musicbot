@@ -7,10 +7,32 @@
 - 🔊 支持高音质播放（最高无损音质）
 - 👤 支持网易云账号登录，播放 VIP 歌曲
 - 📋 队列管理：暂停、继续、切歌、查看队列
+- 🎶 歌单播放：支持播放网易云歌单
+- 📊 榜单播放：热歌榜、飙升榜、新歌榜、原创榜
+- 🎤 歌手歌曲：播放歌手热门歌曲
+- 🔗 相似歌曲：查找并播放相似歌曲
+- 📝 实时歌词：卡片化 UI 显示歌词
+- 🎛️ Web 控制面板：浏览器管理播放状态
 
 ---
 
 ## 更新日志
+
+### v1.2.0
+- ✨ **Web 控制面板**：浏览器访问 `http://localhost:PORT` 管理机器人
+  - 实时查看播放状态、队列、歌词
+  - 播放控制：暂停、继续、切歌、停止
+  - 队列管理：删除歌曲、清空队列
+  - 运行日志实时查看（SSE）
+  - 网易云 Cookie 登录管理
+- ✨ **歌单播放**：`!歌单 歌单名/ID/链接` 播放整个歌单
+- ✨ **榜单播放**：`!榜单 热歌榜/飙升榜/新歌榜/原创榜`
+- ✨ **歌手歌曲**：`!歌手 歌手名` 播放热门歌曲
+- ✨ **相似歌曲**：`!相似` 查找当前歌曲的相似歌曲
+- ✨ **帮助命令**：`!帮助` 查看所有可用指令
+- 🎨 **卡片化 UI**：使用 KOOK 消息卡片展示播放信息
+- 📝 **实时歌词**：显示当前歌曲歌词
+- 🔧 **语音保活**：防止机器人播放中意外退出频道
 
 ### v1.1.0
 - ✨ **网易云登录支持**：配置账号后可播放 VIP 歌曲
@@ -31,6 +53,7 @@
 | 音乐数据 | [NeteaseCloudMusicApi](https://www.npmjs.com/package/NeteaseCloudMusicApi) | 网易云非官方 Node.js 封装，提供搜索与播放链接获取 |
 | 配置管理 | dotenv + zod | 读取 `.env` 并做 Schema 校验，启动时快速失败 |
 | 开发工具 | tsx | 免编译直接运行 TypeScript，支持 `watch` 热重载 |
+| Web 控制面板 | Node.js http | 内置 HTTP 服务器，SSE 实时日志推送 |
 
 ---
 
@@ -42,6 +65,7 @@ src/
 ├── config/
 │   └── env.ts                # 读取并校验环境变量，导出 AppConfig
 ├── shared/
+│   ├── cards.ts              # KOOK 消息卡片构建工具
 │   ├── commands.ts           # 指令名称与别名常量表
 │   ├── logger.ts             # 轻量层级日志（ConsoleLogger，支持 child scope）
 │   └── messages.ts           # 所有用户可见文案的集中管理
@@ -50,22 +74,29 @@ src/
 │   ├── message-router.ts     # 解析前缀指令、分发到各指令处理函数
 │   └── commands/             # 每条指令一个文件
 │       ├── types.ts          # 指令上下文类型 CommandContext
-│       ├── play.ts
-│       ├── pause.ts
-│       ├── resume.ts
-│       ├── skip.ts
-│       ├── stop.ts
-│       ├── queue.ts
-│       └── now-playing.ts
+│       ├── play.ts           # 点歌指令
+│       ├── playlist.ts       # 歌单播放指令
+│       ├── top-list.ts       # 榜单播放指令
+│       ├── artist.ts         # 歌手歌曲指令
+│       ├── simi.ts           # 相似歌曲指令
+│       ├── pause.ts          # 暂停指令
+│       ├── resume.ts         # 继续指令
+│       ├── skip.ts           # 切歌指令
+│       ├── stop.ts           # 停止指令
+│       ├── queue.ts          # 队列查看指令
+│       ├── now-playing.ts    # 当前播放指令
+│       └── help.ts           # 帮助指令
 ├── music/
 │   ├── types.ts              # 核心数据类型：PlaybackTrack / GuildMusicSession
 │   ├── queue-manager.ts      # 操作 session.queue 的纯函数封装
 │   ├── session-manager.ts    # 按 guildId 维护播放会话的 Map
 │   └── player.ts             # 播放核心：搜索 → 入队 → 连接语音 → 推流 → 熔断
-└── services/
-    ├── audio-source.ts       # 启动 ffmpeg 子进程，将 HTTP 流转为字节块推给 koice
-    ├── netease-service.ts    # 调用 NeteaseCloudMusicApi：搜索 + 登录 + 获取播放 URL
-    └── netease-auth.ts       # 网易云账号认证管理器
+├── services/
+│   ├── audio-source.ts       # 启动 ffmpeg 子进程，将 HTTP 流转为字节块推给 koice
+│   ├── netease-service.ts    # 调用 NeteaseCloudMusicApi：搜索 + 登录 + 获取播放 URL
+│   └── netease-auth.ts       # 网易云账号认证管理器
+└── dashboard/
+    └── server.ts             # Web 控制面板服务器（内置 HTML/JS 前端）
 ```
 
 ---
@@ -106,6 +137,15 @@ src/
      → reason=stop        → 断开连接
      → reason=error (ENOENT) → 识别 ffmpeg 缺失，停止并提示
      → reason=error (其他)   → consecutiveErrors++，≥3 次熔断
+
+  其他指令流程：
+  - !歌单 → NeteaseService.getPlaylist(id) → 批量入队 → 逐首播放
+  - !榜单 → NeteaseService.getTopList(type) → 批量入队 → 逐首播放
+  - !歌手 → NeteaseService.getArtistSongs(id) → 批量入队 → 逐首播放
+  - !相似 → NeteaseService.getSimilarSongs(id) → 批量入队 → 逐首播放
+
+  Web 控制面板：
+  浏览器 → HTTP API → Player/SessionManager → 实时状态更新（SSE）
 ```
 
 ---
@@ -135,6 +175,9 @@ FFMPEG_PATH=ffmpeg
 # 队列空后多少秒自动离开语音频道，0 = 不自动断开
 IDLE_DISCONNECT_SECONDS=120
 
+# Web 控制面板端口，默认 3000
+DASHBOARD_PORT=3000
+
 # ========================================
 # 网易云音乐登录配置（可选）
 # 配置后可播放 VIP 歌曲、无损音质
@@ -161,8 +204,22 @@ IDLE_DISCONNECT_SECONDS=120
 |------|--------|------|
 | 手机号+密码 | `NETEASE_PHONE` + `NETEASE_PASSWORD` | 每次启动时自动登录 |
 | Cookie | `NETEASE_COOKIE` | 手动填入登录后的 Cookie，避免频繁登录 |
+| Web 控制面板 | 浏览器管理 | 在控制面板中更新 Cookie（推荐） |
 
 > 💡 **提示**：首次使用手机号登录成功后，日志会输出 Cookie，将其保存到 `.env` 的 `NETEASE_COOKIE` 可避免频繁登录导致账号风控。
+
+### Web 控制面板
+
+机器人启动后会开启 Web 控制面板，默认地址：`http://localhost:3000`
+
+**功能：**
+- 📊 实时查看系统状态（内存、运行时间、活跃会话）
+- 🎮 播放控制（暂停、继续、切歌、停止）
+- 📋 队列管理（删除歌曲、清空队列）
+- 📝 实时运行日志（支持过滤和自动滚动）
+- 🔐 网易云 Cookie 登录管理
+
+> 端口可通过 `DASHBOARD_PORT` 环境变量修改。
 
 ---
 
@@ -198,14 +255,30 @@ npm start
 | 指令 | 别名 | 说明 |
 |------|------|------|
 | `!点歌 <关键词>` | `!播放`、`!play` | 搜索并加入播放队列 |
+| `!歌单 <歌单名/ID/链接>` | `!playlist`、`!pl` | 播放网易云歌单 |
+| `!榜单 <榜单名>` | `!排行榜`、`!chart`、`!top` | 播放热门榜单（热歌榜/飙升榜/新歌榜/原创榜） |
+| `!歌手 <歌手名>` | `!artist` | 播放歌手热门歌曲 |
+| `!相似` | `!相似歌曲`、`!simi` | 查找并播放与当前歌曲相似的歌曲 |
 | `!暂停` | `!pause` | 暂停当前播放 |
 | `!继续` | `!恢复`、`!resume` | 继续播放 |
-| `!切歌` | `!下一首`、`!skip`、`!next` | 跳过当前歌曲 |
+| `!切歌` | `!下一首`、`!skip`、`!next` | 跳过当前歌曲（可指定跳到第几首） |
 | `!停止` | `!停播`、`!清空`、`!stop` | 停止播放并清空队列 |
-| `!队列` | `!歌单`、`!queue`、`!list` | 查看当前播放队列 |
-| `!当前播放` | `!正在播放`、`!np` | 查看正在播放的歌曲 |
+| `!队列` | `!歌单列表`、`!queue`、`!list` | 查看当前播放队列 |
+| `!当前播放` | `!正在播放`、`!np`、`!nowplaying` | 查看当前播放的歌曲和歌词 |
+| `!帮助` | `!菜单`、`!help`、`!menu` | 查看所有可用指令 |
 
 > 前缀可在 `.env` 的 `COMMAND_PREFIX` 中修改。
+
+### 使用示例
+
+```
+!点歌 周杰伦 晴天
+!歌单 网易云热歌榜
+!榜单 飙升榜
+!歌手 林俊杰
+!相似
+!切歌 3        # 跳到队列第 3 首
+```
 
 ---
 
@@ -224,6 +297,10 @@ npm start
 业务核心，负责协调语音连接与播放生命周期。
 
 - **`play()`**：调用 KOOK API 确认用户所在语音频道 → 搜索歌曲 → 入队 → 触发播放
+- **`playPlaylist()`**：获取歌单歌曲 → 批量入队 → 触发播放
+- **`playTopList()`**：获取榜单歌曲 → 批量入队 → 触发播放
+- **`playArtist()`**：获取歌手热门歌曲 → 批量入队 → 触发播放
+- **`playSimilar()`**：获取相似歌曲 → 批量入队 → 触发播放
 - **`playNext()`**：出队 → `ensureConnection()` 复用或新建 koice 连接 → 创建 `AudioSource`
 - **`handleSourceClosed()`**：统一处理播放结束事件，区分正常结束、主动停止、错误三种场景
 - **错误熔断**：`consecutiveErrors` 字段记录连续失败次数，≥3 次自动停止队列；`ENOENT` 直接识别为 ffmpeg 缺失，立即停止并发送友好提示
@@ -238,11 +315,13 @@ npm start
 |------|------|------|
 | `queue` | `PlaybackTrack[]` | 待播队列 |
 | `currentTrack` | `PlaybackTrack` | 当前歌曲 |
+| `currentLyrics` | `string[]` | 当前歌词数组 |
 | `connection` | `Koice` | 语音连接实例 |
 | `source` | `ActiveAudioSource` | ffmpeg 推流实例 |
 | `state` | `idle/buffering/playing/paused` | 播放状态 |
 | `consecutiveErrors` | `number` | 连续失败计数（熔断用） |
 | `idleTimer` | `Timeout` | 空闲自动断开定时器 |
+| `playbackStartedAt` | `number` | 播放开始时间戳 |
 
 ### `FfmpegAudioSource`（`audio-source.ts`）
 
@@ -266,12 +345,44 @@ npm start
   - `login(phone, password)`：手机号+密码登录，密码自动 MD5 加密
   - `setCookie(cookie)`：直接设置登录态 Cookie
   - `checkLoginStatus()`：检查当前登录状态
+  - `getCookie()`：获取当前 Cookie
 
 - **音乐获取**：
   - `searchFirstPlayable(keyword)`：`cloudsearch(type=1)` 搜索单曲，自动选择可播放的歌曲
   - `resolvePlayableUrl(songId)`：获取歌曲播放链接
     - 已登录：优先尝试 Hi-Res → 无损 → 极高音质
     - 未登录：请求最高可用码率（最高 999kbps）
+  - `getPlaylist(id)`：获取歌单详情和歌曲列表
+  - `getTopList(type)`：获取榜单歌曲（热歌榜/飙升榜/新歌榜/原创榜）
+  - `getArtistSongs(id)`：获取歌手热门歌曲
+  - `getSimilarSongs(songId)`：获取相似歌曲推荐
+  - `getLyrics(songId)`：获取歌曲歌词
+
+### `Dashboard`
+
+Web 控制面板服务器，内置 HTML/JS 前端：
+
+- **HTTP API**：
+  - `GET /api/status`：系统状态（内存、CPU、运行时间）
+  - `GET /api/sessions`：所有会话完整信息
+  - `POST /api/sessions/:guildId/pause`：暂停播放
+  - `POST /api/sessions/:guildId/resume`：继续播放
+  - `POST /api/sessions/:guildId/skip`：切歌
+  - `POST /api/sessions/:guildId/stop`：停止播放
+  - `DELETE /api/sessions/:guildId/queue/:index`：删除队列歌曲
+  - `DELETE /api/sessions/:guildId/queue`：清空队列
+  - `GET /api/logs`：获取历史日志
+  - `GET /api/logs/stream`：SSE 实时日志流
+  - `GET /api/auth`：获取登录状态
+  - `POST /api/auth/cookie`：更新 Cookie
+  - `POST /api/auth/check`：验证登录状态
+
+- **前端功能**：
+  - 实时显示播放状态、进度、歌词
+  - 播放控制按钮（暂停/继续/切歌/停止）
+  - 队列管理（删除/清空）
+  - 日志实时滚动和过滤
+  - Cookie 登录管理界面
 
 ### `NeteaseAuthService`
 
@@ -300,3 +411,13 @@ npm start
 ### 调整 ffmpeg 转码参数
 
 修改 `src/services/audio-source.ts` 中 `start()` 方法的 `args` 数组，例如调整采样率、码率或输出格式。
+
+### 扩展 Web 控制面板
+
+1. 在 `src/dashboard/server.ts` 中添加新的 API 路由
+2. 在 `DashboardHTML` 常量中修改 HTML/JS 前端
+3. 使用 `serializeSession()` 函数格式化会话数据
+
+### 自定义消息卡片
+
+修改 `src/shared/cards.ts` 中的卡片构建函数，调整 KOOK 消息卡片的样式和内容。
