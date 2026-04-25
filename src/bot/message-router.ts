@@ -7,11 +7,15 @@ import type { Player } from "../music/player";
 import { handleNowPlayingCommand } from "./commands/now-playing";
 import { handlePauseCommand } from "./commands/pause";
 import { handlePlayCommand } from "./commands/play";
+import { handlePlaylistCommand } from "./commands/playlist";
 import { handleQueueCommand } from "./commands/queue";
 import { handleResumeCommand } from "./commands/resume";
 import { handleSkipCommand } from "./commands/skip";
 import { handleStopCommand } from "./commands/stop";
 import { handleHelpCommand } from "./commands/help";
+import { handleTopListCommand } from "./commands/top-list";
+import { handleSimiCommand } from "./commands/simi";
+import { handleArtistCommand } from "./commands/artist";
 
 export class MessageRouter {
   private readonly commandAliasMap = new Map<string, CommandKey>();
@@ -65,6 +69,9 @@ export class MessageRouter {
         case "play":
           reply = await handlePlayCommand(context, argsText);
           break;
+        case "playlist":
+          reply = await handlePlaylistCommand(context, argsText);
+          break;
         case "pause":
           reply = await handlePauseCommand(context);
           break;
@@ -72,7 +79,7 @@ export class MessageRouter {
           reply = await handleResumeCommand(context);
           break;
         case "skip":
-          reply = await handleSkipCommand(context);
+          reply = await handleSkipCommand(context, argsText);
           break;
         case "stop":
           reply = await handleStopCommand(context);
@@ -85,6 +92,15 @@ export class MessageRouter {
           break;
         case "help":
           reply = handleHelpCommand(context);
+          break;
+        case "topList":
+          reply = await handleTopListCommand(context, argsText);
+          break;
+        case "simi":
+          reply = await handleSimiCommand(context);
+          break;
+        case "artist":
+          reply = await handleArtistCommand(context, argsText);
           break;
       }
 
