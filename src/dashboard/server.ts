@@ -149,10 +149,15 @@ export function startDashboardServer(
         return;
       }
 
-      // ── 会话列表（含完整信息） ──
+      // ── 会话列表（含完整信息 + 系统状态） ──
       if (path === "/api/sessions" && method === "GET") {
         const sessions = sessionManager.values().map(serializeSession);
-        jsonResponse(res, 200, { sessions });
+        const memoryUsage = process.memoryUsage();
+        jsonResponse(res, 200, {
+          sessions,
+          memory: Math.round(memoryUsage.rss / 1024 / 1024) + " MB",
+          uptime: process.uptime(),
+        });
         return;
       }
 
@@ -308,16 +313,6 @@ export function startDashboardServer(
               await player.stop(match.guildId);
               jsonResponse(res, 200, { ok: true });
               return;
-            case "seek": {
-              const body = (await readBody(req)) as { offsetMs?: number };
-              if (typeof body.offsetMs !== "number" || body.offsetMs < 0) {
-                jsonResponse(res, 400, { error: "缺少有效的 offsetMs 参数" });
-                return;
-              }
-              await player.seek(match.guildId, body.offsetMs);
-              jsonResponse(res, 200, { ok: true });
-              return;
-            }
           }
         }
 
@@ -409,11 +404,7 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg)
 .track-info { margin-bottom: 12px; }
 .track-info .title { font-size: 1.1rem; font-weight: 600; }
 .track-info .artist { color: var(--t2); font-size: 0.9rem; }
-.progress-bar { height: 10px; background: rgba(255,255,255,.1); border-radius: 5px; margin: 8px 0; overflow: hidden; cursor: pointer; position: relative; }
-.progress-bar:hover { background: rgba(255,255,255,.18); }
-.progress-bar .fill { height: 100%; background: linear-gradient(90deg,var(--accent),#818cf8); border-radius: 5px; transition: width 1s linear; pointer-events: none; }
-.progress-bar .seek-tip { display: none; position: absolute; top: -28px; background: rgba(0,0,0,.85); color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; white-space: nowrap; transform: translateX(-50%); pointer-events: none; }
-.progress-bar:hover .seek-tip { display: block; }
+.progress-bar { height: 6px; background: rgba(255,255,255,.1); border-radius: 3px; margin: 8px 0; overflow: hidden; }
 .progress-bar .fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 1s linear; }
 .progress-text { font-size: 0.8rem; color: var(--t2); }
 .btn-group { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
@@ -518,23 +509,31 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg)
       <div>当前 Cookie:</div>
       <div class="cookie-display" id="auth-cookie">-</div>
 
-      <!-- 扫码登录 -->
-      <div class="qr-section">
-        <button class="btn btn-primary" id="qr-start">扫码登录</button>
-        <div id="qr-container" style="display:none">
-          <div class="qr-img"><img id="qr-img" src="" alt="二维码"></div>
-          <div class="qr-status" id="qr-status">正在生成二维码...</div>
-          <button class="btn btn-ghost" id="qr-refresh" style="display:none">刷新二维码</button>
-        </div>
+      <!-- 已登录：切换账号 -->
+      <div id="auth-switch" style="display:none;margin-top:16px">
+        <button class="btn btn-ghost" id="auth-switch-btn">切换账号</button>
       </div>
 
-      <div class="divider">或手动粘贴 Cookie</div>
+      <!-- 未登录：登录方式 -->
+      <div id="login-forms">
+        <!-- 扫码登录 -->
+        <div class="qr-section">
+          <button class="btn btn-primary" id="qr-start">扫码登录</button>
+          <div id="qr-container" style="display:none">
+            <div class="qr-img"><img id="qr-img" src="" alt="二维码"></div>
+            <div class="qr-status" id="qr-status">正在生成二维码...</div>
+            <button class="btn btn-ghost" id="qr-refresh" style="display:none">刷新二维码</button>
+          </div>
+        </div>
 
-      <div>
-        <textarea id="auth-cookie-input" placeholder="粘贴完整的 Cookie 字符串..."></textarea>
-        <div class="btn-group">
-          <button class="btn btn-primary" id="auth-save">验证并保存</button>
-          <button class="btn btn-ghost" id="auth-check">重新验证当前状态</button>
+        <div class="divider">或手动粘贴 Cookie</div>
+
+        <div>
+          <textarea id="auth-cookie-input" placeholder="粘贴完整的 Cookie 字符串..."></textarea>
+          <div class="btn-group">
+            <button class="btn btn-primary" id="auth-save">验证并保存</button>
+            <button class="btn btn-ghost" id="auth-check">重新验证当前状态</button>
+          </div>
         </div>
       </div>
       <div class="warn">Cookie 包含登录凭证，请勿分享给他人</div>
@@ -577,12 +576,12 @@ function renderControl(data){
     var st=s.state==="playing"?"播放中":s.state==="paused"?"已暂停":s.state==="buffering"?"缓冲中":"空闲";
     var tt=s.currentTrack?esc(s.currentTrack.title):"无歌曲";
     var ta=s.currentTrack?esc(s.currentTrack.artistNames):"";
+    var gid=esc(s.guildId);
     var prog="";
     if(s.currentTrack&&s.currentTrack.durationMs&&s.elapsed!=null){
       var pct=Math.min(100,s.elapsed/(s.currentTrack.durationMs/1000)*100);
-      prog='<div class="progress-bar" data-duration="'+s.currentTrack.durationMs+'" data-gid="'+gid+'" onclick="seekClick(event,this)"><div class="seek-tip"></div><div class="fill" style="width:'+pct+'%"></div></div><div class="progress-text">'+fmt(s.elapsed*1000)+" / "+fmt(s.currentTrack.durationMs)+'</div>';
+      prog='<div class="progress-bar"><div class="fill" style="width:'+pct+'%"></div></div><div class="progress-text">'+fmt(s.elapsed*1000)+" / "+fmt(s.currentTrack.durationMs)+'</div>';
     }
-    var gid=esc(s.guildId);
     var isPlaying=s.state==="playing";
     var isPaused=s.state==="paused";
     var hasTrack=!!s.currentTrack;
@@ -612,26 +611,6 @@ window.doAction=function(gid,action){
     else toast(r.error||"操作失败","error");
   }).catch(function(){toast("请求失败","error")});
 };
-window.seekClick=function(ev,el){
-  var rect=el.getBoundingClientRect();
-  var ratio=Math.max(0,Math.min(1,(ev.clientX-rect.left)/rect.width));
-  var dur=parseInt(el.dataset.duration,10);
-  var gid=el.dataset.gid;
-  var offsetMs=Math.floor(ratio*dur);
-  api.post("/api/sessions/"+encodeURIComponent(gid)+"/seek",{offsetMs:offsetMs}).then(function(r){
-    if(r.ok)toast("已跳转到 "+fmt(offsetMs));else toast(r.error||"跳转失败","error");
-  }).catch(function(){toast("请求失败","error")});
-};
-document.addEventListener("mousemove",function(ev){
-  var el=ev.target.closest&&ev.target.closest(".progress-bar");
-  if(!el)return;
-  var rect=el.getBoundingClientRect();
-  var ratio=Math.max(0,Math.min(1,(ev.clientX-rect.left)/rect.width));
-  var dur=parseInt(el.dataset.duration,10);
-  if(!dur)return;
-  var tip=el.querySelector(".seek-tip");
-  if(tip){tip.textContent=fmt(Math.floor(ratio*dur));tip.style.left=(ratio*100)+"%"}
-});
 var pendingOps=0;
 window.delQueueItem=function(gid,idx){
   pendingOps++;
@@ -657,10 +636,8 @@ function poll(){
   api.get("/api/sessions").then(function(r){
     var data=r.sessions||[];
     document.getElementById("last-update").textContent=new Date().toLocaleTimeString()+" 更新";
-    api.get("/api/status").then(function(s){
-      document.getElementById("stat-memory").textContent=s.memory.rss;
-      document.getElementById("stat-uptime").textContent=fmtUptime(s.uptime);
-    });
+    if(r.memory) document.getElementById("stat-memory").textContent=r.memory;
+    if(r.uptime!=null) document.getElementById("stat-uptime").textContent=fmtUptime(r.uptime);
     renderControl(data);
   }).catch(function(){
     document.getElementById("last-update").textContent="连接中断...";
@@ -720,6 +697,9 @@ function refreshAuth(){
     dot.className="auth-dot "+(r.isLoggedIn?"on":"off");
     txt.textContent=r.isLoggedIn?"已登录":"未登录";
     document.getElementById("auth-cookie").textContent=r.cookieMasked||"无 Cookie";
+    document.getElementById("login-forms").style.display=r.isLoggedIn?"none":"";
+    document.getElementById("auth-switch").style.display=r.isLoggedIn?"":"none";
+    if(r.isLoggedIn){stopQrPolling();qrKey=null}
   });
 }
 refreshAuth();
@@ -738,6 +718,11 @@ document.getElementById("auth-check").addEventListener("click",function(){
     toast(r.isLoggedIn?"登录态有效":"登录态无效",r.isLoggedIn?"success":"error");
     refreshAuth();
   }).catch(function(){toast("验证失败","error")});
+});
+
+document.getElementById("auth-switch-btn").addEventListener("click",function(){
+  document.getElementById("login-forms").style.display="";
+  document.getElementById("auth-switch").style.display="none";
 });
 
 // ── 扫码登录 ──

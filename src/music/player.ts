@@ -1,6 +1,5 @@
 import Kasumi, { Card, MessageType } from "kasumi.js";
 
-
 import Koice from "koice";
 import type { AppConfig } from "../config/env";
 import { messages } from "../shared/messages";
@@ -13,6 +12,7 @@ import { SessionManager } from "./session-manager";
 import type { GuildMusicSession, PlaybackTrack, VoiceChannelRef } from "./types";
 
 export class Player {
+
   constructor(
     private readonly client: Kasumi<Record<string, never>>,
     private readonly config: AppConfig,
@@ -359,37 +359,6 @@ export class Player {
 
     session.source.resume();
     this.sessionManager.setState(guildId, "playing");
-    await this.updatePlayerPanel(guildId);
-  }
-
-  async seek(guildId: string, offsetMs: number): Promise<void> {
-    const session = this.sessionManager.get(guildId);
-    if (!session?.source || !session.currentTrack) {
-      return;
-    }
-
-    // 校验偏移范围
-    const durationMs = session.currentTrack.durationMs;
-    if (offsetMs < 0) {
-      offsetMs = 0;
-    }
-    if (durationMs && offsetMs >= durationMs) {
-      // 超出歌曲时长，直接切歌
-      await session.source.stop("skip");
-      return;
-    }
-
-    await session.source.seek(offsetMs);
-
-    // 重置播放起始时间，保持进度和歌词同步
-    session.playbackStartedAt = Date.now() - offsetMs;
-    session.lastLyricIdx = undefined;
-
-    // 确保状态为播放中
-    if (session.state !== "playing") {
-      this.sessionManager.setState(guildId, "playing");
-    }
-
     await this.updatePlayerPanel(guildId);
   }
 
@@ -934,6 +903,7 @@ export class Player {
 
     return undefined;
   }
+
 
   private stateLabel(state: GuildMusicSession["state"]): string {
     switch (state) {
