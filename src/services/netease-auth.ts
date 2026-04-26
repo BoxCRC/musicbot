@@ -72,4 +72,11 @@ export class NeteaseAuthService {
   isLoggedIn(): boolean {
     return this.hasLoggedIn;
   }
+
+  /**
+   * 设置登录状态（供外部登录流程调用）
+   */
+  setLoggedIn(value: boolean): void {
+    this.hasLoggedIn = value;
+  }
 }

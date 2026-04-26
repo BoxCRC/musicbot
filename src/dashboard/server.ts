@@ -1,5 +1,7 @@
 import http from "http";
 import os from "os";
+import fs from "fs";
+import nodePath from "path";
 import type { Player } from "../music/player";
 import type { SessionManager } from "../music/session-manager";
 import type { NeteaseService } from "../services/netease-service";
@@ -221,6 +223,9 @@ export function startDashboardServer(
         }
         neteaseService.setCookie(body.cookie);
         const isValid = await neteaseService.checkLoginStatus();
+        if (isValid) {
+          neteaseAuthService.setLoggedIn(true);
+        }
         logger.info(`通过控制面板更新 Cookie，验证结果：${isValid ? "有效" : "无效"}`);
         jsonResponse(res, 200, {
           ok: true,
@@ -259,6 +264,9 @@ export function startDashboardServer(
           const result = await neteaseService.checkQrLoginStatus(body.key);
           if (result.code === 803) {
             const isValid = await neteaseService.checkLoginStatus();
+            if (isValid) {
+              neteaseAuthService.setLoggedIn(true);
+            }
             logger.info(`扫码登录成功，Cookie 验证结果：${isValid ? "有效" : "无效"}`);
           }
           jsonResponse(res, 200, {
@@ -269,6 +277,42 @@ export function startDashboardServer(
         } catch (error) {
           logger.error("检查二维码状态失败", error);
           jsonResponse(res, 500, { error: "检查二维码状态失败" });
+        }
+        return;
+      }
+
+      // ── 机器人 Token 配置 ──
+      if (path === "/api/config/token" && method === "GET") {
+        const token = process.env.KOOK_BOT_TOKEN || "";
+        const masked = token ? token.substring(0, 8) + "..." + token.slice(-4) : null;
+        jsonResponse(res, 200, { hasToken: !!token, tokenMasked: masked });
+        return;
+      }
+
+      if (path === "/api/config/token" && method === "POST") {
+        const body = (await readBody(req)) as { token?: string };
+        if (!body.token || typeof body.token !== "string") {
+          jsonResponse(res, 400, { error: "缺少 token 字段" });
+          return;
+        }
+        try {
+          const envPath = nodePath.resolve(process.cwd(), ".env");
+          let envContent = "";
+          if (fs.existsSync(envPath)) {
+            envContent = fs.readFileSync(envPath, "utf-8");
+          }
+          if (/^KOOK_BOT_TOKEN=/m.test(envContent)) {
+            envContent = envContent.replace(/^KOOK_BOT_TOKEN=.*$/m, `KOOK_BOT_TOKEN=${body.token}`);
+          } else {
+            envContent = envContent.trimEnd() + `\nKOOK_BOT_TOKEN=${body.token}\n`;
+          }
+          fs.writeFileSync(envPath, envContent, "utf-8");
+          process.env.KOOK_BOT_TOKEN = body.token;
+          logger.info("KOOK Bot Token 已保存到 .env 文件");
+          jsonResponse(res, 200, { ok: true, message: "Token 已保存，重启后生效" });
+        } catch (error) {
+          logger.error("保存 Token 失败", error);
+          jsonResponse(res, 500, { error: "保存 Token 失败" });
         }
         return;
       }
@@ -472,6 +516,7 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg)
   <div class="tabs">
     <button class="tab-btn active" data-tab="main">控制面板</button>
     <button class="tab-btn" data-tab="auth">登录设置</button>
+    <button class="tab-btn" data-tab="settings">系统设置</button>
   </div>
 
   <!-- 主页面：状态 + 控制 + 日志 -->
@@ -537,6 +582,23 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg)
         </div>
       </div>
       <div class="warn">Cookie 包含登录凭证，请勿分享给他人</div>
+    </div>
+  </div>
+
+  <!-- Tab: 系统设置 -->
+  <div class="tab-panel" id="tab-settings">
+    <div class="glass auth-card">
+      <h2 style="margin-bottom:16px">机器人 Token</h2>
+      <div>当前 Token:</div>
+      <div class="cookie-display" id="token-display">-</div>
+      <div style="margin-top:16px">
+        <div style="margin-bottom:8px;font-weight:600">更新 Token:</div>
+        <textarea id="token-input" placeholder="粘贴 KOOK Bot Token..."></textarea>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="token-save">保存 Token</button>
+        </div>
+      </div>
+      <div class="warn">Token 修改后需要重启机器人生效</div>
     </div>
   </div>
 </div>
@@ -790,6 +852,23 @@ document.getElementById("qr-refresh").addEventListener("click",function(){
     document.getElementById("qr-status").textContent="请求失败";document.getElementById("qr-status").className="qr-status expired";
     document.getElementById("qr-refresh").style.display="";
   });
+});
+
+// ── 机器人 Token ──
+function refreshToken(){
+  api.get("/api/config/token").then(function(r){
+    document.getElementById("token-display").textContent=r.hasToken?(r.tokenMasked||"已设置"):"未配置";
+  });
+}
+refreshToken();
+
+document.getElementById("token-save").addEventListener("click",function(){
+  var val=document.getElementById("token-input").value.trim();
+  if(!val){toast("请输入 Token","error");return}
+  api.post("/api/config/token",{token:val}).then(function(r){
+    if(r.ok){toast(r.message);document.getElementById("token-input").value="";refreshToken()}
+    else toast(r.error||"保存失败","error");
+  }).catch(function(){toast("请求失败","error")});
 });
 </script>
 </body>
