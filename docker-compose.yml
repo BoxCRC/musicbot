@@ -5,4 +5,4 @@ services:
     restart: always
     env_file: .env
     ports:
-      - "127.0.0.1:18800:3000"
+      - "0.0.0.0:18800:3000"
