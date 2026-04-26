@@ -231,6 +231,43 @@ export function startDashboardServer(
         return;
       }
 
+      // ── 扫码登录 ──
+      if (path === "/api/auth/qr/create" && method === "POST") {
+        try {
+          const { key, qrimg } = await neteaseService.createQrLogin();
+          logger.info("已生成扫码登录二维码");
+          jsonResponse(res, 200, { ok: true, key, qrimg });
+        } catch (error) {
+          logger.error("生成二维码失败", error);
+          jsonResponse(res, 500, { error: "生成二维码失败" });
+        }
+        return;
+      }
+
+      if (path === "/api/auth/qr/check" && method === "POST") {
+        const body = (await readBody(req)) as { key?: string };
+        if (!body.key || typeof body.key !== "string") {
+          jsonResponse(res, 400, { error: "缺少 key 字段" });
+          return;
+        }
+        try {
+          const result = await neteaseService.checkQrLoginStatus(body.key);
+          if (result.code === 803) {
+            const isValid = await neteaseService.checkLoginStatus();
+            logger.info(`扫码登录成功，Cookie 验证结果：${isValid ? "有效" : "无效"}`);
+          }
+          jsonResponse(res, 200, {
+            ok: true,
+            code: result.code,
+            message: result.message,
+          });
+        } catch (error) {
+          logger.error("检查二维码状态失败", error);
+          jsonResponse(res, 500, { error: "检查二维码状态失败" });
+        }
+        return;
+      }
+
       // ── 会话操作路由 ──
       const match = matchSessionRoute(path);
       if (match) {
@@ -271,6 +308,16 @@ export function startDashboardServer(
               await player.stop(match.guildId);
               jsonResponse(res, 200, { ok: true });
               return;
+            case "seek": {
+              const body = (await readBody(req)) as { offsetMs?: number };
+              if (typeof body.offsetMs !== "number" || body.offsetMs < 0) {
+                jsonResponse(res, 400, { error: "缺少有效的 offsetMs 参数" });
+                return;
+              }
+              await player.seek(match.guildId, body.offsetMs);
+              jsonResponse(res, 200, { ok: true });
+              return;
+            }
           }
         }
 
@@ -362,7 +409,11 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg)
 .track-info { margin-bottom: 12px; }
 .track-info .title { font-size: 1.1rem; font-weight: 600; }
 .track-info .artist { color: var(--t2); font-size: 0.9rem; }
-.progress-bar { height: 6px; background: rgba(255,255,255,.1); border-radius: 3px; margin: 8px 0; overflow: hidden; }
+.progress-bar { height: 10px; background: rgba(255,255,255,.1); border-radius: 5px; margin: 8px 0; overflow: hidden; cursor: pointer; position: relative; }
+.progress-bar:hover { background: rgba(255,255,255,.18); }
+.progress-bar .fill { height: 100%; background: linear-gradient(90deg,var(--accent),#818cf8); border-radius: 5px; transition: width 1s linear; pointer-events: none; }
+.progress-bar .seek-tip { display: none; position: absolute; top: -28px; background: rgba(0,0,0,.85); color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; white-space: nowrap; transform: translateX(-50%); pointer-events: none; }
+.progress-bar:hover .seek-tip { display: block; }
 .progress-bar .fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 1s linear; }
 .progress-text { font-size: 0.8rem; color: var(--t2); }
 .btn-group { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
@@ -405,6 +456,14 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg)
 .auth-card .cookie-display { font-family: monospace; font-size: 0.85rem; color: var(--t2);
   background: rgba(0,0,0,.2); padding: 8px 12px; border-radius: 6px; margin: 8px 0; word-break: break-all; }
 .auth-card .warn { color: var(--warning); font-size: 0.85rem; margin-top: 12px; }
+.qr-section { text-align: center; padding: 16px 0; }
+.qr-section .qr-img { width: 200px; height: 200px; border-radius: 12px; background: #fff; padding: 8px; margin: 12px auto; }
+.qr-section .qr-img img { width: 100%; height: 100%; }
+.qr-section .qr-status { font-size: 0.9rem; color: var(--t2); margin: 8px 0; min-height: 24px; }
+.qr-section .qr-status.success { color: var(--success); }
+.qr-section .qr-status.expired { color: var(--danger); }
+.divider { display: flex; align-items: center; gap: 12px; margin: 20px 0; color: var(--t2); font-size: 0.85rem; }
+.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 .empty { text-align: center; padding: 40px; color: var(--t2); }
 .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 10px;
   font-size: 0.9rem; font-weight: 600; z-index: 999; animation: slideIn .3s ease; }
@@ -458,8 +517,20 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg)
       </div>
       <div>当前 Cookie:</div>
       <div class="cookie-display" id="auth-cookie">-</div>
-      <div style="margin-top:16px">
-        <div style="margin-bottom:8px;font-weight:600">更新 Cookie:</div>
+
+      <!-- 扫码登录 -->
+      <div class="qr-section">
+        <button class="btn btn-primary" id="qr-start">扫码登录</button>
+        <div id="qr-container" style="display:none">
+          <div class="qr-img"><img id="qr-img" src="" alt="二维码"></div>
+          <div class="qr-status" id="qr-status">正在生成二维码...</div>
+          <button class="btn btn-ghost" id="qr-refresh" style="display:none">刷新二维码</button>
+        </div>
+      </div>
+
+      <div class="divider">或手动粘贴 Cookie</div>
+
+      <div>
         <textarea id="auth-cookie-input" placeholder="粘贴完整的 Cookie 字符串..."></textarea>
         <div class="btn-group">
           <button class="btn btn-primary" id="auth-save">验证并保存</button>
@@ -509,7 +580,7 @@ function renderControl(data){
     var prog="";
     if(s.currentTrack&&s.currentTrack.durationMs&&s.elapsed!=null){
       var pct=Math.min(100,s.elapsed/(s.currentTrack.durationMs/1000)*100);
-      prog='<div class="progress-bar"><div class="fill" style="width:'+pct+'%"></div></div><div class="progress-text">'+fmt(s.elapsed*1000)+" / "+fmt(s.currentTrack.durationMs)+'</div>';
+      prog='<div class="progress-bar" data-duration="'+s.currentTrack.durationMs+'" data-gid="'+gid+'" onclick="seekClick(event,this)"><div class="seek-tip"></div><div class="fill" style="width:'+pct+'%"></div></div><div class="progress-text">'+fmt(s.elapsed*1000)+" / "+fmt(s.currentTrack.durationMs)+'</div>';
     }
     var gid=esc(s.guildId);
     var isPlaying=s.state==="playing";
@@ -541,20 +612,48 @@ window.doAction=function(gid,action){
     else toast(r.error||"操作失败","error");
   }).catch(function(){toast("请求失败","error")});
 };
+window.seekClick=function(ev,el){
+  var rect=el.getBoundingClientRect();
+  var ratio=Math.max(0,Math.min(1,(ev.clientX-rect.left)/rect.width));
+  var dur=parseInt(el.dataset.duration,10);
+  var gid=el.dataset.gid;
+  var offsetMs=Math.floor(ratio*dur);
+  api.post("/api/sessions/"+encodeURIComponent(gid)+"/seek",{offsetMs:offsetMs}).then(function(r){
+    if(r.ok)toast("已跳转到 "+fmt(offsetMs));else toast(r.error||"跳转失败","error");
+  }).catch(function(){toast("请求失败","error")});
+};
+document.addEventListener("mousemove",function(ev){
+  var el=ev.target.closest&&ev.target.closest(".progress-bar");
+  if(!el)return;
+  var rect=el.getBoundingClientRect();
+  var ratio=Math.max(0,Math.min(1,(ev.clientX-rect.left)/rect.width));
+  var dur=parseInt(el.dataset.duration,10);
+  if(!dur)return;
+  var tip=el.querySelector(".seek-tip");
+  if(tip){tip.textContent=fmt(Math.floor(ratio*dur));tip.style.left=(ratio*100)+"%"}
+});
+var pendingOps=0;
 window.delQueueItem=function(gid,idx){
+  pendingOps++;
   api.del("/api/sessions/"+encodeURIComponent(gid)+"/queue/"+idx).then(function(r){
     if(r.ok)toast("已删除");else toast(r.error||"删除失败","error");
-  }).catch(function(){toast("请求失败","error")});
+  }).catch(function(){toast("请求失败","error")}).finally(function(){
+    pendingOps--;poll();
+  });
 };
 window.clearQueue=function(gid){
   if(!confirm("确认清空队列？"))return;
+  pendingOps++;
   api.del("/api/sessions/"+encodeURIComponent(gid)+"/queue").then(function(r){
     if(r.ok)toast("队列已清空");else toast(r.error||"操作失败","error");
-  }).catch(function(){toast("请求失败","error")});
+  }).catch(function(){toast("请求失败","error")}).finally(function(){
+    pendingOps--;poll();
+  });
 };
 
 // ── 轮询 ──
 function poll(){
+  if(pendingOps>0)return;
   api.get("/api/sessions").then(function(r){
     var data=r.sessions||[];
     document.getElementById("last-update").textContent=new Date().toLocaleTimeString()+" 更新";
@@ -639,6 +738,73 @@ document.getElementById("auth-check").addEventListener("click",function(){
     toast(r.isLoggedIn?"登录态有效":"登录态无效",r.isLoggedIn?"success":"error");
     refreshAuth();
   }).catch(function(){toast("验证失败","error")});
+});
+
+// ── 扫码登录 ──
+var qrPollingTimer=null;
+var qrKey=null;
+
+function stopQrPolling(){if(qrPollingTimer){clearInterval(qrPollingTimer);qrPollingTimer=null}}
+
+function startQrPolling(){
+  stopQrPolling();
+  qrPollingTimer=setInterval(function(){
+    if(!qrKey)return;
+    api.post("/api/auth/qr/check",{key:qrKey}).then(function(r){
+      var el=document.getElementById("qr-status");
+      if(!r.ok){el.textContent=r.error||"检查失败";el.className="qr-status expired";stopQrPolling();return}
+      if(r.code===800){
+        el.textContent="二维码已过期，请点击刷新";el.className="qr-status expired";
+        document.getElementById("qr-refresh").style.display="";stopQrPolling();
+      }else if(r.code===801){
+        el.textContent="请使用网易云音乐 App 扫描二维码";el.className="qr-status";
+      }else if(r.code===802){
+        el.textContent="已扫码，请在手机上确认登录";el.className="qr-status";
+      }else if(r.code===803){
+        el.textContent="登录成功！";el.className="qr-status success";
+        stopQrPolling();refreshAuth();
+        setTimeout(function(){document.getElementById("qr-container").style.display="none"},2000);
+        toast("扫码登录成功");
+      }
+    }).catch(function(){});
+  },3000);
+}
+
+document.getElementById("qr-start").addEventListener("click",function(){
+  var container=document.getElementById("qr-container");
+  container.style.display="";
+  document.getElementById("qr-status").textContent="正在生成二维码...";
+  document.getElementById("qr-status").className="qr-status";
+  document.getElementById("qr-refresh").style.display="none";
+  document.getElementById("qr-start").style.display="none";
+
+  api.post("/api/auth/qr/create").then(function(r){
+    if(!r.ok){document.getElementById("qr-status").textContent=r.error||"生成失败";document.getElementById("qr-status").className="qr-status expired";document.getElementById("qr-start").style.display="";return}
+    qrKey=r.key;
+    document.getElementById("qr-img").src=r.qrimg;
+    document.getElementById("qr-status").textContent="请使用网易云音乐 App 扫描二维码";
+    startQrPolling();
+  }).catch(function(){
+    document.getElementById("qr-status").textContent="请求失败";document.getElementById("qr-status").className="qr-status expired";
+    document.getElementById("qr-start").style.display="";
+  });
+});
+
+document.getElementById("qr-refresh").addEventListener("click",function(){
+  this.style.display="none";
+  document.getElementById("qr-status").textContent="正在生成二维码...";
+  document.getElementById("qr-status").className="qr-status";
+
+  api.post("/api/auth/qr/create").then(function(r){
+    if(!r.ok){document.getElementById("qr-status").textContent=r.error||"生成失败";document.getElementById("qr-status").className="qr-status expired";document.getElementById("qr-refresh").style.display="";return}
+    qrKey=r.key;
+    document.getElementById("qr-img").src=r.qrimg;
+    document.getElementById("qr-status").textContent="请使用网易云音乐 App 扫描二维码";
+    startQrPolling();
+  }).catch(function(){
+    document.getElementById("qr-status").textContent="请求失败";document.getElementById("qr-status").className="qr-status expired";
+    document.getElementById("qr-refresh").style.display="";
+  });
 });
 </script>
 </body>

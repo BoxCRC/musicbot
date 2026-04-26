@@ -158,6 +158,75 @@ export class NeteaseService {
   }
 
   /**
+   * 创建二维码登录会话，返回二维码图片（base64）和 key
+   */
+  async createQrLogin(): Promise<{ key: string; qrimg: string }> {
+    const keyResponse = await NeteaseCloudMusicApi.login_qr_key({});
+    const keyBody = keyResponse.body as { data?: { unikey?: string } };
+    const unikey = keyBody.data?.unikey;
+    if (!unikey) {
+      throw new Error("获取二维码 key 失败");
+    }
+
+    const createResponse = await NeteaseCloudMusicApi.login_qr_create({
+      key: unikey,
+      qrimg: true as unknown as string,
+    });
+    const createBody = createResponse.body as { data?: { qrimg?: string; qrurl?: string } };
+    const qrimg = createBody.data?.qrimg;
+    if (!qrimg) {
+      throw new Error("生成二维码失败");
+    }
+
+    return { key: unikey, qrimg };
+  }
+
+  /**
+   * 检查二维码扫码状态
+   * 返回状态码：800=过期 801=等待扫码 802=已扫码等待确认 803=登录成功
+   */
+  async checkQrLoginStatus(key: string): Promise<{ code: number; cookie?: string; message: string }> {
+    const response = await NeteaseCloudMusicApi.login_qr_check({ key });
+    const body = response.body as { code?: number; cookie?: string; message?: string };
+
+    const code = body.code ?? 0;
+    let message: string;
+
+    switch (code) {
+      case 800:
+        message = "二维码已过期，请重新生成";
+        break;
+      case 801:
+        message = "等待扫码...";
+        break;
+      case 802:
+        message = "已扫码，请在手机上确认";
+        break;
+      case 803:
+        message = "登录成功";
+        break;
+      default:
+        message = body.message ?? "未知状态";
+    }
+
+    // 登录成功时，从响应中提取 cookie
+    let cookie: string | undefined;
+    if (code === 803) {
+      if (body.cookie) {
+        cookie = body.cookie;
+      } else if (response.cookie) {
+        cookie = Array.isArray(response.cookie) ? response.cookie.join(";") : response.cookie;
+      }
+      // 使用获取到的 cookie 验证并保存
+      if (cookie) {
+        this.setCookie(cookie);
+      }
+    }
+
+    return { code, cookie, message };
+  }
+
+  /**
    * 检查登录状态
    */
   async checkLoginStatus(): Promise<boolean> {

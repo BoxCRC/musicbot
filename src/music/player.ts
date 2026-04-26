@@ -362,6 +362,37 @@ export class Player {
     await this.updatePlayerPanel(guildId);
   }
 
+  async seek(guildId: string, offsetMs: number): Promise<void> {
+    const session = this.sessionManager.get(guildId);
+    if (!session?.source || !session.currentTrack) {
+      return;
+    }
+
+    // 校验偏移范围
+    const durationMs = session.currentTrack.durationMs;
+    if (offsetMs < 0) {
+      offsetMs = 0;
+    }
+    if (durationMs && offsetMs >= durationMs) {
+      // 超出歌曲时长，直接切歌
+      await session.source.stop("skip");
+      return;
+    }
+
+    await session.source.seek(offsetMs);
+
+    // 重置播放起始时间，保持进度和歌词同步
+    session.playbackStartedAt = Date.now() - offsetMs;
+    session.lastLyricIdx = undefined;
+
+    // 确保状态为播放中
+    if (session.state !== "playing") {
+      this.sessionManager.setState(guildId, "playing");
+    }
+
+    await this.updatePlayerPanel(guildId);
+  }
+
   async skip(guildId: string, position?: number): Promise<void> {
     const session = this.sessionManager.get(guildId);
     if (!session?.currentTrack || !session.source) {

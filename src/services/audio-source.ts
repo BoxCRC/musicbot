@@ -20,6 +20,7 @@ export interface ActiveAudioSource {
   pause(): void;
   resume(): void;
   stop(reason?: "skip" | "stop"): Promise<void>;
+  seek(offsetMs: number): Promise<void>;
 }
 
 class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
@@ -63,6 +64,30 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
     this.currentState = "playing";
   }
 
+  async seek(offsetMs: number): Promise<void> {
+    if (this.finalized || !this.process) {
+      return;
+    }
+
+    // 移除旧进程的事件监听器，防止触发 finalize
+    const oldProcess = this.process;
+    this.process = undefined;
+    oldProcess.removeAllListeners();
+    oldProcess.stdout.removeAllListeners();
+    oldProcess.stderr.removeAllListeners();
+
+    await new Promise<void>((resolve) => {
+      oldProcess.once("close", () => resolve());
+      oldProcess.kill();
+    });
+
+    // 以新偏移量重启 ffmpeg
+    this.currentState = "playing";
+    this.firstDataEmitted = false;
+    this.stderrLines = [];
+    this.start(Math.floor(offsetMs / 1000));
+  }
+
   async stop(reason: "skip" | "stop" = "stop"): Promise<void> {
     if (this.finalized) {
       return;
@@ -83,7 +108,7 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
     await completed;
   }
 
-  private start(): void {
+  private start(offsetSec?: number): void {
     const args = [
       "-hide_banner",
       "-loglevel",
@@ -94,6 +119,13 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
       "1",
       "-reconnect_delay_max",
       "5",
+    ];
+
+    if (offsetSec && offsetSec > 0) {
+      args.push("-ss", String(offsetSec));
+    }
+
+    args.push(
       "-re",
       "-i",
       this.track.sourceUrl,
@@ -111,7 +143,7 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
       "-f",
       "mp3",
       "pipe:1",
-    ];
+    );
 
     this.process = spawn(this.ffmpegPath, args, {
       windowsHide: true,
