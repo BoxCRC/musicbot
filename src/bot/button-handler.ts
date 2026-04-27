@@ -22,6 +22,7 @@ export function setupButtonHandlers(
     }
 
     try {
+      logger.info(`用户点击按钮：${action}，服务器：${guildId}`);
       switch (action) {
         case "pause":
           await player.pause(guildId);

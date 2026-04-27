@@ -65,6 +65,8 @@ export class MessageRouter {
         commandPrefix: this.commandPrefix,
       };
 
+      this.logger.info(`用户执行命令：${commandKey}，参数：${argsText || "无"}`);
+
       switch (commandKey) {
         case "play":
           reply = await handlePlayCommand(context, argsText);

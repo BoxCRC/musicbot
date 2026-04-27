@@ -340,20 +340,24 @@ export function startDashboardServer(
           }
           switch (match.action) {
             case "pause":
+              logger.info(`控制面板操作：暂停播放，服务器：${match.guildId}`);
               await player.pause(match.guildId);
               jsonResponse(res, 200, { ok: true });
               return;
             case "resume":
+              logger.info(`控制面板操作：继续播放，服务器：${match.guildId}`);
               await player.resume(match.guildId);
               jsonResponse(res, 200, { ok: true });
               return;
             case "skip": {
               const body = (await readBody(req)) as { position?: number };
+              logger.info(`控制面板操作：切歌，服务器：${match.guildId}${body.position ? `，位置：${body.position}` : ""}`);
               await player.skip(match.guildId, body.position);
               jsonResponse(res, 200, { ok: true });
               return;
             }
             case "stop":
+              logger.info(`控制面板操作：停止播放，服务器：${match.guildId}`);
               await player.stop(match.guildId);
               jsonResponse(res, 200, { ok: true });
               return;
