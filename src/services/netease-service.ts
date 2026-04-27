@@ -377,48 +377,41 @@ export class NeteaseService {
   }
 
   /**
-   * 批量解析歌单内歌曲的可播放 URL，并发控制
-   * 返回可播放的 PlaybackTrack 列表
+   * 批量构建歌单内歌曲的 PlaybackTrack（不解析 URL）
+   * URL 在播放时按需解析，避免批量解析后链接过期
    */
-  async resolvePlaylistTracks(
+  buildPlaylistTracks(
     songs: NeteaseSong[],
     requestedBy: string,
-    concurrency: number = 5,
-  ): Promise<PlaybackTrack[]> {
-    const results: PlaybackTrack[] = [];
-    this.logger.info(`开始批量解析 ${songs.length} 首歌曲的播放地址（并发 ${concurrency}）`);
+  ): PlaybackTrack[] {
+    return songs.map((song) => ({
+      id: String(song.id),
+      title: song.name,
+      artistNames: this.getArtistNames(song),
+      durationMs: song.dt ?? song.duration,
+      requestedBy,
+    }));
+  }
 
-    for (let i = 0; i < songs.length; i += concurrency) {
-      const batch = songs.slice(i, i + concurrency);
-      const batchResults = await Promise.allSettled(
-        batch.map(async (song) => {
-          const urlResult = await this.resolvePlayableUrl(song.id);
-          if (!urlResult?.url) {
-            return undefined;
-          }
-          return {
-            id: String(song.id),
-            title: song.name,
-            artistNames: this.getArtistNames(song),
-            durationMs: song.dt ?? song.duration,
-            sourceUrl: urlResult.url,
-            requestedBy,
-          } satisfies PlaybackTrack;
-        }),
-      );
-
-      for (const result of batchResults) {
-        if (result.status === "fulfilled" && result.value) {
-          results.push(result.value);
-        }
-      }
-
-      // 每批解析完后记录进度
-      const processed = Math.min(i + concurrency, songs.length);
-      this.logger.debug(`播放地址解析进度：${processed}/${songs.length}，已找到 ${results.length} 首可播放`);
+  /**
+   * 为单首歌曲解析可播放 URL（播放时调用）
+   * 返回解析后的 PlaybackTrack，如果无法播放则返回 undefined
+   */
+  async resolveTrackUrl(track: PlaybackTrack): Promise<PlaybackTrack | undefined> {
+    const songId = Number(track.id);
+    if (isNaN(songId)) {
+      return undefined;
     }
 
-    return results;
+    const urlResult = await this.resolvePlayableUrl(songId);
+    if (!urlResult?.url) {
+      return undefined;
+    }
+
+    return {
+      ...track,
+      sourceUrl: urlResult.url,
+    };
   }
 
   private async fetchAllPlaylistTracks(playlistId: number): Promise<NeteaseSong[]> {

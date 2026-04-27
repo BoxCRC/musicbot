@@ -8,7 +8,7 @@ export type PlaybackTrack = {
   title: string;
   artistNames: string;
   durationMs?: number;
-  sourceUrl: string;
+  sourceUrl?: string; // 播放时才解析，入队时可为空
   requestedBy: string;
 };
 

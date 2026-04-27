@@ -38,6 +38,10 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
     private readonly onChunk: (chunk: Buffer) => void,
   ) {
     super();
+    if (!track.sourceUrl) {
+      this.finalize({ reason: "error", error: new Error("歌曲缺少播放地址") });
+      return;
+    }
     this.start();
   }
 
@@ -84,6 +88,7 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
   }
 
   private start(): void {
+    const sourceUrl = this.track.sourceUrl!;
     const args = [
       "-hide_banner",
       "-loglevel",
@@ -96,7 +101,7 @@ class FfmpegAudioSource extends EventEmitter implements ActiveAudioSource {
       "5",
       "-re",
       "-i",
-      this.track.sourceUrl,
+      sourceUrl,
       "-vn",
       "-filter:a",
       "loudnorm=I=-16:LRA=11:TP=-1.5,volume=0.2",

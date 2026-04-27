@@ -6,17 +6,25 @@
 - 🎵 搜索并播放网易云音乐
 - 🔊 支持高音质播放（最高无损音质）
 - 👤 支持网易云账号登录，播放 VIP 歌曲
+- 📱 扫码登录：Web 控制面板支持网易云 App 扫码登录
 - 📋 队列管理：暂停、继续、切歌、查看队列
 - 🎶 歌单播放：支持播放网易云歌单
 - 📊 榜单播放：热歌榜、飙升榜、新歌榜、原创榜
 - 🎤 歌手歌曲：播放歌手热门歌曲
 - 🔗 相似歌曲：查找并播放相似歌曲
 - 📝 实时歌词：卡片化 UI 显示歌词
-- 🎛️ Web 控制面板：浏览器管理播放状态
+- 🎛️ Web 控制面板：浏览器管理播放状态和系统设置
+- 🐳 Docker 部署：支持容器化一键部署
 
 ---
 
 ## 更新日志
+
+### v1.3.0
+- ✨ **扫码登录**：Web 控制面板支持网易云 App 扫码登录，无需手动粘贴 Cookie
+- ✨ **系统设置**：Web 控制面板新增系统设置页面，可管理 KOOK Bot Token
+- 🐳 **Docker 部署**：新增 Dockerfile 和 docker-compose.yml，一键容器化部署
+- ⚡ **按需解析优化**：歌曲播放地址改为播放时按需解析，解决大批量歌单链接过期（403）问题
 
 ### v1.2.0
 - ✨ **Web 控制面板**：浏览器访问 `http://localhost:PORT` 管理机器人
@@ -54,6 +62,7 @@
 | 配置管理 | dotenv + zod | 读取 `.env` 并做 Schema 校验，启动时快速失败 |
 | 开发工具 | tsx | 免编译直接运行 TypeScript，支持 `watch` 热重载 |
 | Web 控制面板 | Node.js http | 内置 HTTP 服务器，SSE 实时日志推送 |
+| 容器化 | Docker + Docker Compose | 一键部署，自动安装 ffmpeg |
 
 ---
 
@@ -139,10 +148,10 @@ src/
      → reason=error (其他)   → consecutiveErrors++，≥3 次熔断
 
   其他指令流程：
-  - !歌单 → NeteaseService.getPlaylist(id) → 批量入队 → 逐首播放
-  - !榜单 → NeteaseService.getTopList(type) → 批量入队 → 逐首播放
-  - !歌手 → NeteaseService.getArtistSongs(id) → 批量入队 → 逐首播放
-  - !相似 → NeteaseService.getSimilarSongs(id) → 批量入队 → 逐首播放
+  - !歌单 → NeteaseService.getPlaylist(id) → buildPlaylistTracks() 入队 → 播放时按需解析 URL
+  - !榜单 → NeteaseService.getTopList(type) → buildPlaylistTracks() 入队 → 播放时按需解析 URL
+  - !歌手 → NeteaseService.getArtistSongs(id) → buildPlaylistTracks() 入队 → 播放时按需解析 URL
+  - !相似 → NeteaseService.getSimilarSongs(id) → buildPlaylistTracks() 入队 → 播放时按需解析 URL
 
   Web 控制面板：
   浏览器 → HTTP API → Player/SessionManager → 实时状态更新（SSE）
@@ -210,9 +219,13 @@ DASHBOARD_PORT=3000
 - 🎮 播放控制（暂停、继续、切歌、停止）
 - 📋 队列管理（删除歌曲、清空队列）
 - 📝 实时运行日志（支持过滤和自动滚动）
-- 🔐 网易云 Cookie 登录管理
+- 🔐 网易云登录管理
+  - 扫码登录：使用网易云音乐 App 扫码登录
+  - Cookie 登录：手动粘贴登录 Cookie
+- ⚙️ 系统设置
+  - 管理 KOOK Bot Token（查看/更新，重启后生效）
 
-> 端口可通过 `DASHBOARD_PORT` 环境变量修改。
+> 端口可通过 `DASHBOARD_PORT` 环境变量修改。Docker 部署时默认映射到 18800 端口。
 
 ---
 
@@ -240,6 +253,22 @@ npm run dev
 npm run build
 npm start
 ```
+
+### Docker 部署
+
+```bash
+# 1. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填入 KOOK_BOT_TOKEN
+
+# 2. 构建并启动
+docker compose up -d
+
+# 查看日志
+docker compose logs -f
+```
+
+Docker 部署会自动安装 ffmpeg，Web 控制面板映射到 `http://localhost:18800`。
 
 ---
 
@@ -290,11 +319,11 @@ npm start
 业务核心，负责协调语音连接与播放生命周期。
 
 - **`play()`**：调用 KOOK API 确认用户所在语音频道 → 搜索歌曲 → 入队 → 触发播放
-- **`playPlaylist()`**：获取歌单歌曲 → 批量入队 → 触发播放
-- **`playTopList()`**：获取榜单歌曲 → 批量入队 → 触发播放
-- **`playArtist()`**：获取歌手热门歌曲 → 批量入队 → 触发播放
-- **`playSimilar()`**：获取相似歌曲 → 批量入队 → 触发播放
-- **`playNext()`**：出队 → `ensureConnection()` 复用或新建 koice 连接 → 创建 `AudioSource`
+- **`playPlaylist()`**：获取歌单歌曲 → `buildPlaylistTracks()` 批量入队（不解析 URL） → 触发播放
+- **`playTopList()`**：获取榜单歌曲 → `buildPlaylistTracks()` 批量入队 → 触发播放
+- **`playArtist()`**：获取歌手热门歌曲 → `buildPlaylistTracks()` 批量入队 → 触发播放
+- **`playSimilar()`**：获取相似歌曲 → `buildPlaylistTracks()` 批量入队 → 触发播放
+- **`playNext()`**：出队 → 按需解析 URL（`resolveTrackUrl`） → `ensureConnection()` 复用或新建 koice 连接 → 创建 `AudioSource`
 - **`handleSourceClosed()`**：统一处理播放结束事件，区分正常结束、主动停止、错误三种场景
 - **错误熔断**：`consecutiveErrors` 字段记录连续失败次数，≥3 次自动停止队列；`ENOENT` 直接识别为 ffmpeg 缺失，立即停止并发送友好提示
 
@@ -339,17 +368,21 @@ npm start
   - `setCookie(cookie)`：直接设置登录态 Cookie
   - `checkLoginStatus()`：检查当前登录状态
   - `getCookie()`：获取当前 Cookie
+  - `createQrLogin()`：创建扫码登录会话，返回二维码图片
+  - `checkQrLoginStatus(key)`：检查扫码登录状态
 
 - **音乐获取**：
   - `searchFirstPlayable(keyword)`：`cloudsearch(type=1)` 搜索单曲，自动选择可播放的歌曲
+  - `buildPlaylistTracks(songs, requestedBy)`：构建歌曲列表（不解析 URL，播放时按需解析）
+  - `resolveTrackUrl(track)`：为单首歌曲按需解析播放 URL（播放时调用）
   - `resolvePlayableUrl(songId)`：获取歌曲播放链接
     - 已登录：优先尝试 Hi-Res → 无损 → 极高音质
     - 未登录：请求最高可用码率（最高 999kbps）
-  - `getPlaylist(id)`：获取歌单详情和歌曲列表
-  - `getTopList(type)`：获取榜单歌曲（热歌榜/飙升榜/新歌榜/原创榜）
-  - `getArtistSongs(id)`：获取歌手热门歌曲
-  - `getSimilarSongs(songId)`：获取相似歌曲推荐
-  - `getLyrics(songId)`：获取歌曲歌词
+  - `getPlaylistDetail(id)`：获取歌单详情和歌曲列表
+  - `getTopList(chartId)`：获取榜单歌曲（热歌榜/飙升榜/新歌榜/原创榜）
+  - `searchArtistTopSongs(keyword)`：搜索歌手并获取热门歌曲
+  - `getSimiSongs(songId)`：获取相似歌曲推荐
+  - `fetchLyrics(songId)`：获取歌曲歌词
 
 ### `Dashboard`
 

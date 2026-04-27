@@ -134,28 +134,27 @@ export class Player {
         await this.sendMessage(session.textChannelId, messages.playlistLoading(playlistName));
       }
 
-      // 批量解析可播放 URL
-      const playableTracks = await this.neteaseService.resolvePlaylistTracks(tracks, requesterName);
+      // 构建歌曲列表（不解析 URL，播放时按需解析）
+      const playlistTracks = this.neteaseService.buildPlaylistTracks(tracks, requesterName);
 
-      if (playableTracks.length === 0) {
+      if (playlistTracks.length === 0) {
         return messages.playlistNoPlayable;
       }
 
       // 批量入队
       const wasEmpty = !session.currentTrack && !session.source;
-      for (const track of playableTracks) {
+      for (const track of playlistTracks) {
         this.queueManager.enqueue(session, track);
       }
 
-      const skipped = tracks.length - playableTracks.length;
-      this.logger.info(`歌单「${playlistName}」加载完成：${playableTracks.length}/${tracks.length} 首可播放`);
+      this.logger.info(`歌单「${playlistName}」加载完成：${playlistTracks.length}/${tracks.length} 首入队`);
 
       // 如果队列之前为空，立即开始播放
       if (wasEmpty) {
         await this.playNext(guildId, false);
       }
 
-      return buildPlaylistLoadedCard(playlistName, tracks.length, playableTracks.length, skipped);
+      return buildPlaylistLoadedCard(playlistName, tracks.length, playlistTracks.length, 0);
     } catch (error) {
       this.logger.warn("歌单加载失败", error);
       if (error instanceof Error && error.message === "PLAYLIST_NOT_FOUND") {
@@ -208,23 +207,22 @@ export class Player {
 
       // 限制最多取前 10 首
       const topTracks = tracks.slice(0, 10);
-      const playableTracks = await this.neteaseService.resolvePlaylistTracks(topTracks, requesterName);
+      const playlistTracks = this.neteaseService.buildPlaylistTracks(topTracks, requesterName);
 
-      if (playableTracks.length === 0) {
+      if (playlistTracks.length === 0) {
         return messages.playlistNoPlayable;
       }
 
       const wasEmpty = !session.currentTrack && !session.source;
-      for (const track of playableTracks) {
+      for (const track of playlistTracks) {
         this.queueManager.enqueue(session, track);
       }
 
-      const skipped = topTracks.length - playableTracks.length;
       if (wasEmpty) {
         await this.playNext(guildId, false);
       }
 
-      return buildTopListCard(name, topTracks.length, playableTracks.length, skipped);
+      return buildTopListCard(name, topTracks.length, playlistTracks.length, 0);
     } catch (error) {
       this.logger.warn("榜单加载失败", error);
       return messages.topListNotFound(chartName);
@@ -253,16 +251,16 @@ export class Player {
         return messages.simiNotFound;
       }
 
-      const playableTracks = await this.neteaseService.resolvePlaylistTracks(songs, requesterName);
-      if (playableTracks.length === 0) {
+      const playlistTracks = this.neteaseService.buildPlaylistTracks(songs, requesterName);
+      if (playlistTracks.length === 0) {
         return messages.simiNotFound;
       }
 
-      for (const track of playableTracks) {
+      for (const track of playlistTracks) {
         this.queueManager.enqueue(session, track);
       }
 
-      return buildSimiSongsCard(session.currentTrack, playableTracks.length);
+      return buildSimiSongsCard(session.currentTrack, playlistTracks.length);
     } catch (error) {
       this.logger.warn("获取相似歌曲失败", error);
       return messages.simiNotFound;
@@ -307,14 +305,14 @@ export class Player {
 
       // 限制最多取前 10 首
       const topTracks = tracks.slice(0, 10);
-      const playableTracks = await this.neteaseService.resolvePlaylistTracks(topTracks, requesterName);
+      const playlistTracks = this.neteaseService.buildPlaylistTracks(topTracks, requesterName);
 
-      if (playableTracks.length === 0) {
+      if (playlistTracks.length === 0) {
         return messages.playlistNoPlayable;
       }
 
       const wasEmpty = !session.currentTrack && !session.source;
-      for (const track of playableTracks) {
+      for (const track of playlistTracks) {
         this.queueManager.enqueue(session, track);
       }
 
@@ -322,7 +320,7 @@ export class Player {
         await this.playNext(guildId, false);
       }
 
-      return buildArtistTopSongsCard(artistName, topTracks.length, playableTracks.length);
+      return buildArtistTopSongsCard(artistName, topTracks.length, playlistTracks.length);
     } catch (error) {
       this.logger.warn("歌手热门歌曲加载失败", error);
       if (error instanceof Error && error.message === "ARTIST_NOT_FOUND") {
@@ -482,6 +480,41 @@ export class Player {
     session.currentTrack = nextTrack;
     this.sessionManager.setState(guildId, "buffering");
 
+    // 如果歌曲没有 URL，按需解析（播放时才解析，避免链接过期）
+    let resolvedTrack = nextTrack;
+    if (!resolvedTrack.sourceUrl) {
+      this.logger.debug(`按需解析歌曲播放地址：${resolvedTrack.title}`);
+      const resolved = await this.neteaseService.resolveTrackUrl(resolvedTrack);
+      if (!resolved) {
+        this.logger.warn(`歌曲无可用播放地址：${resolvedTrack.title}`);
+        session.currentTrack = undefined;
+        session.consecutiveErrors += 1;
+        this.sessionManager.setState(guildId, "idle");
+
+        // 连续错误熔断
+        if (session.consecutiveErrors >= 3) {
+          session.consecutiveErrors = 0;
+          this.queueManager.clear(session);
+          await this.closeConnection(session, "too many consecutive errors");
+          if (session.textChannelId) {
+            await this.sendMessage(session.textChannelId, buildStatusCard(messages.playbackAborted, Card.Theme.DANGER));
+          }
+          return;
+        }
+
+        if (session.textChannelId) {
+          await this.sendMessage(
+            session.textChannelId,
+            buildStatusCard(messages.playbackError(resolvedTrack, "无法获取播放地址"), Card.Theme.WARNING),
+          );
+        }
+        await this.playNext(guildId, announceInChannel, previousMsgId);
+        return;
+      }
+      resolvedTrack = resolved;
+      session.currentTrack = resolvedTrack;
+    }
+
     let connection: Koice;
     try {
       connection = await this.ensureConnection(session);
@@ -501,7 +534,7 @@ export class Player {
       if (session.textChannelId) {
         await this.sendMessage(
           session.textChannelId,
-          buildStatusCard(messages.playbackError(nextTrack, "无法连接语音频道"), Card.Theme.WARNING),
+          buildStatusCard(messages.playbackError(resolvedTrack, "无法连接语音频道"), Card.Theme.WARNING),
         );
       }
       await this.playNext(guildId, announceInChannel, previousMsgId);
@@ -511,7 +544,7 @@ export class Player {
     session.consecutiveErrors = 0;
 
     const source = createAudioSource(
-      nextTrack,
+      resolvedTrack,
       this.config.ffmpegPath,
       this.logger,
       (chunk) => connection.push(chunk),
@@ -523,10 +556,10 @@ export class Player {
     this.sessionManager.setState(guildId, "playing");
 
     // 异步获取歌词，获取后更新卡片
-    this.neteaseService.fetchLyrics(nextTrack.id).then(async (lyrics) => {
+    this.neteaseService.fetchLyrics(resolvedTrack.id).then(async (lyrics) => {
       session.currentLyrics = lyrics;
       // 歌词加载后立即更新播放器面板
-      if (session.nowPlayingMsgId && session.currentTrack === nextTrack) {
+      if (session.nowPlayingMsgId && session.currentTrack === resolvedTrack) {
         await this.updatePlayerPanel(guildId);
       }
     }).catch(() => {});
@@ -534,12 +567,12 @@ export class Player {
     // 音频首帧到达时才开始计时，避免 ffmpeg 启动延迟导致歌词超前
     source.once("firstData", async () => {
       session.playbackStartedAt = Date.now();
-      this.logger.info(`正在播放：${nextTrack.title} - ${nextTrack.artistNames}`);
+      this.logger.info(`正在播放：${resolvedTrack.title} - ${resolvedTrack.artistNames}`);
       this.startProgressUpdater(session, guildId);
       this.startLyricsUpdater(session, guildId);
 
       // 立即更新播放器面板，刷新进度和歌词
-      if (session.nowPlayingMsgId && session.currentTrack === nextTrack) {
+      if (session.nowPlayingMsgId && session.currentTrack === resolvedTrack) {
         await this.updatePlayerPanel(guildId);
       }
     });
@@ -550,7 +583,7 @@ export class Player {
 
     // 更新或发送卡片
     const card = buildPlayerPanelCard({
-      track: nextTrack,
+      track: resolvedTrack,
       state: "playing",
       queue: this.queueManager.list(session),
     });
