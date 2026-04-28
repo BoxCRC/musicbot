@@ -300,37 +300,45 @@ export function buildPlayerPanelCard(params: {
   }
 
   // 控制按钮（使用 action-group 实现横排）
+  // buffering 状态下暂停/切歌无意义（source 尚未创建），只显示停止按钮
   card.addDivider();
-  const pauseResumeAction = state === "paused" ? BUTTON_ACTIONS.RESUME : BUTTON_ACTIONS.PAUSE;
-  const pauseResumeText = state === "paused" ? "继续" : "暂停";
-  const pauseResumeTheme = state === "paused" ? Theme.SUCCESS : Theme.WARNING;
+
+  const elements: unknown[] = [];
+
+  if (state !== "buffering") {
+    const pauseResumeAction = state === "paused" ? BUTTON_ACTIONS.RESUME : BUTTON_ACTIONS.PAUSE;
+    const pauseResumeText = state === "paused" ? "继续" : "暂停";
+    const pauseResumeTheme = state === "paused" ? Theme.SUCCESS : Theme.WARNING;
+
+    elements.push({
+      type: "button",
+      theme: pauseResumeTheme,
+      value: buildButtonValue(pauseResumeAction),
+      click: "return-val",
+      text: { type: "plain-text", content: pauseResumeText },
+    });
+
+    elements.push({
+      type: "button",
+      theme: Theme.PRIMARY,
+      value: buildButtonValue(BUTTON_ACTIONS.SKIP),
+      click: "return-val",
+      text: { type: "plain-text", content: "切歌" },
+    });
+  }
+
+  elements.push({
+    type: "button",
+    theme: Theme.DANGER,
+    value: buildButtonValue(BUTTON_ACTIONS.STOP),
+    click: "return-val",
+    text: { type: "plain-text", content: "停止" },
+  });
 
   // 手动构建 action-group 模块
   card.addModule({
     type: "action-group" as any,
-    elements: [
-      {
-        type: "button",
-        theme: pauseResumeTheme,
-        value: buildButtonValue(pauseResumeAction),
-        click: "return-val",
-        text: { type: "plain-text", content: pauseResumeText },
-      },
-      {
-        type: "button",
-        theme: Theme.PRIMARY,
-        value: buildButtonValue(BUTTON_ACTIONS.SKIP),
-        click: "return-val",
-        text: { type: "plain-text", content: "切歌" },
-      },
-      {
-        type: "button",
-        theme: Theme.DANGER,
-        value: buildButtonValue(BUTTON_ACTIONS.STOP),
-        click: "return-val",
-        text: { type: "plain-text", content: "停止" },
-      },
-    ],
+    elements,
   } as any);
 
   return card;

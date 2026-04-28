@@ -480,6 +480,17 @@ export class Player {
     session.currentTrack = nextTrack;
     this.sessionManager.setState(guildId, "buffering");
 
+    // 立即更新卡片，显示下一首歌的缓冲状态，给用户即时反馈
+    const bufferingMsgId = previousMsgId || session.nowPlayingMsgId;
+    if (bufferingMsgId) {
+      const bufferingCard = buildPlayerPanelCard({
+        track: nextTrack,
+        state: "buffering",
+        queue: this.queueManager.list(session),
+      });
+      await this.updateMessage(bufferingMsgId, bufferingCard);
+    }
+
     // 如果歌曲没有 URL，按需解析（播放时才解析，避免链接过期）
     let resolvedTrack = nextTrack;
     if (!resolvedTrack.sourceUrl) {
@@ -688,16 +699,37 @@ export class Player {
       throw new Error("缺少语音频道上下文");
     }
 
-    const connection = await Koice.create(
-      this.client,
-      session.voiceChannelId,
-      {
-        forceRealSpeed: true,
-        rtcpMux: false,
-        bitrateFactor: 1.0,
-      },
-      this.config.ffmpegPath,
-    );
+    // 清理残留的已关闭连接引用
+    if (session.connection) {
+      session.connection = undefined;
+    }
+
+    const maxRetries = 2;
+    let connection: Koice | null = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (attempt > 0) {
+        this.logger.warn(`语音连接重试 ${attempt}/${maxRetries}`);
+        // 重试前先确保离开频道，避免 "已在频道中" 导致 join 失败
+        try {
+          await this.client.API.voice.leave(session.voiceChannelId);
+        } catch { /* 忽略 */ }
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+      }
+
+      connection = await Koice.create(
+        this.client,
+        session.voiceChannelId,
+        {
+          forceRealSpeed: true,
+          rtcpMux: false,
+          bitrateFactor: 1.0,
+        },
+        this.config.ffmpegPath,
+      );
+
+      if (connection) break;
+    }
 
     if (!connection) {
       throw new Error("Koice 连接初始化失败");
@@ -728,9 +760,17 @@ export class Player {
     this.clearIdleTimer(session);
     this.stopVoiceKeepAlive(session);
 
+    const voiceChannelId = session.voiceChannelId;
+
     if (!session.connection) {
       session.voiceChannelId = undefined;
       session.voiceChannelName = undefined;
+      // 兜底：即使没有连接对象，也确保 KOOK 侧离开频道
+      if (voiceChannelId) {
+        try {
+          await this.client.API.voice.leave(voiceChannelId);
+        } catch { /* 已经不在频道中 */ }
+      }
       return;
     }
 
@@ -743,6 +783,13 @@ export class Player {
       await connection.close(reason);
     } catch (error) {
       this.logger.warn("关闭语音连接失败", error);
+    }
+
+    // 兜底：确保 KOOK 侧也离开频道，防止 koice 内部状态不一致导致机器人残留
+    if (voiceChannelId) {
+      try {
+        await this.client.API.voice.leave(voiceChannelId);
+      } catch { /* 已经离开或不在频道中 */ }
     }
   }
 

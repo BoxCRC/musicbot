@@ -650,12 +650,13 @@ function renderControl(data){
     }
     var isPlaying=s.state==="playing";
     var isPaused=s.state==="paused";
+    var isBuffering=s.state==="buffering";
     var hasTrack=!!s.currentTrack;
     var btns='<div class="btn-group">';
     if(hasTrack){
-      btns+=isPlaying?'<button class="btn btn-warning" onclick="doAction(\\''+gid+'\\',\\'pause\\')">暂停</button>':'';
+      if(isPlaying) btns+='<button class="btn btn-warning" onclick="doAction(\\''+gid+'\\',\\'pause\\')">暂停</button>';
       if(isPaused) btns+='<button class="btn btn-primary" onclick="doAction(\\''+gid+'\\',\\'resume\\')">继续</button>';
-      btns+='<button class="btn btn-danger" onclick="doAction(\\''+gid+'\\',\\'skip\\')">切歌</button>';
+      if(!isBuffering) btns+='<button class="btn btn-danger" onclick="doAction(\\''+gid+'\\',\\'skip\\')">切歌</button>';
       btns+='<button class="btn btn-danger" onclick="doAction(\\''+gid+'\\',\\'stop\\')">停止</button>';
     }
     btns+='</div>';
