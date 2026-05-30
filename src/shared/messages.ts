@@ -20,7 +20,7 @@ export const messages = {
   skipOutOfRange: (queueLength: number) => `队列中没有第 ${queueLength > 0 ? `该位置的歌曲，队列共 ${queueLength} 首` : "歌曲，队列为空"}。`,
   stopped: "已停止播放并清空队列。",
   searchFailed: (keyword: string) => `没有在网易云找到可播放的结果：${keyword}`,
-  playlistUsage: (prefix: string) => `用法：${prefix}歌单 <歌单名/ID/链接>`,
+  playlistUsage: (prefix: string) => `用法：${prefix}歌单 <歌单名/ID/链接>\n      ${prefix}歌单 随机 <歌单名/ID/链接>`,
   playlistSearchFailed: (keyword: string) => `没有在网易云找到歌单：${keyword}`,
   playlistLoadFailed: "获取歌单详情失败，请检查歌单 ID 或链接是否正确。",
   playlistEmpty: "该歌单内没有歌曲。",

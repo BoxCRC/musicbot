@@ -183,14 +183,15 @@ export function buildPlaylistLoadedCard(
   totalTracks: number,
   loadedTracks: number,
   skippedTracks: number,
+  shuffled = false,
 ): Card {
   const card = new Card();
   card.setTheme(Theme.SUCCESS);
-  card.addTitle("歌单已加载");
+  card.addTitle(shuffled ? "歌单已随机加载" : "歌单已加载");
   card.addText(`**${playlistName}**`);
   card.addDivider();
   card.addText(`共 ${totalTracks} 首，成功入队 ${loadedTracks} 首${skippedTracks > 0 ? `，跳过 ${skippedTracks} 首` : ""}`);
-  card.addContext("发送 /队列 查看完整播放列表");
+  card.addContext(shuffled ? "已按随机顺序入队，发送 /队列 查看完整播放列表" : "发送 /队列 查看完整播放列表");
   return card;
 }
 

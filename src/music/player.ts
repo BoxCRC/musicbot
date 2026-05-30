@@ -78,6 +78,7 @@ export class Player {
     requesterId: string,
     requesterName: string,
     input: string,
+    options?: { shuffle?: boolean },
   ): Promise<string | Card> {
     const trimmedInput = input.trim();
     if (!trimmedInput) {
@@ -141,20 +142,22 @@ export class Player {
         return messages.playlistNoPlayable;
       }
 
+      const tracksToEnqueue = options?.shuffle ? this.shuffleTracks(playlistTracks) : playlistTracks;
+
       // 批量入队
       const wasEmpty = !session.currentTrack && !session.source;
-      for (const track of playlistTracks) {
+      for (const track of tracksToEnqueue) {
         this.queueManager.enqueue(session, track);
       }
 
-      this.logger.info(`歌单「${playlistName}」加载完成：${playlistTracks.length}/${tracks.length} 首入队`);
+      this.logger.info(`歌单「${playlistName}」加载完成：${playlistTracks.length}/${tracks.length} 首入队${options?.shuffle ? "（随机顺序）" : ""}`);
 
       // 如果队列之前为空，立即开始播放
       if (wasEmpty) {
         await this.playNext(guildId, false);
       }
 
-      return buildPlaylistLoadedCard(playlistName, tracks.length, playlistTracks.length, 0);
+      return buildPlaylistLoadedCard(playlistName, tracks.length, playlistTracks.length, 0, options?.shuffle ?? false);
     } catch (error) {
       this.logger.warn("歌单加载失败", error);
       if (error instanceof Error && error.message === "PLAYLIST_NOT_FOUND") {
@@ -446,6 +449,15 @@ export class Player {
         await this.closeConnection(session, "shutdown");
       }
     }
+  }
+
+  private shuffleTracks(tracks: PlaybackTrack[]): PlaybackTrack[] {
+    const shuffled = [...tracks];
+    for (let i = shuffled.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
   }
 
   private async playNext(guildId: string, announceInChannel: boolean, previousMsgId?: string): Promise<void> {

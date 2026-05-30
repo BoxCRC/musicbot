@@ -1,6 +1,6 @@
 export const COMMANDS = {
   play: { name: "点歌", aliases: ["点歌", "播放", "play"], desc: "搜索并播放歌曲，用法：点歌 歌曲名" },
-  playlist: { name: "歌单", aliases: ["歌单", "playlist", "pl"], desc: "播放网易云歌单，用法：歌单 歌单名/ID/链接" },
+  playlist: { name: "歌单", aliases: ["歌单", "playlist", "pl"], desc: "播放网易云歌单，用法：歌单 歌单名/ID/链接 或 歌单 随机 歌单名/ID/链接" },
   pause: { name: "暂停", aliases: ["暂停", "pause"], desc: "暂停当前播放" },
   resume: { name: "继续", aliases: ["继续", "恢复", "resume"], desc: "继续播放" },
   skip: { name: "切歌", aliases: ["切歌", "下一首", "skip", "next"], desc: "切歌，用法：切歌（下一首）或 切歌 3（跳到第3首）" },
